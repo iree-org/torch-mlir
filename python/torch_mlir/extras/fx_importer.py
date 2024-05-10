@@ -425,6 +425,7 @@ class FxImporter:
         "_py_attr_tracker",
         "_hooks",
         "symbol_table",
+        "anticipated_return_value",
     ]
 
     def __init__(
@@ -452,6 +453,7 @@ class FxImporter:
         self._hooks = hooks or FxImporterHooks()
         self.symbol_table = SymbolTable(self._m.operation)
         self._hooks.prepare_module(self._m.operation)
+        self.anticipated_return_value = []
 
     def _config_check(self):
         for dname in REQUIRED_DIALCTS:
@@ -823,6 +825,8 @@ class FxImporter:
         """
         input_types = []
         result_types = []
+        anticipated_return_value = []
+        
         loc = None
         for node in g.nodes:
             # Assume that the first node we can get a location for is about as
@@ -836,11 +840,14 @@ class FxImporter:
                 # always be "boxed" as a tuple, which we emit as multi-results.
                 for result_node in node.args[0]:
                     if result_node is None:
-                        result_types.append(
-                            IrType.parse("!torch.none", context=self._c)
-                        )
+                        # result_types.append(
+                        #     IrType.parse("!torch.none", context=self._c)
+                        # )
+                        anticipated_return_value.append(False)
                     else:
+                        anticipated_return_value.append(True)
                         result_types.append(self._cc.node_val_to_type(result_node))
+        self.anticipated_return_value = anticipated_return_value                        
         return (
             FunctionType.get(input_types, result_types, context=self._c),
             loc if loc else Location.unknown(self._c),
@@ -1229,7 +1236,7 @@ class GraphNodeImporter:
                 elif op == "output" and not skip_placeholders_outputs:
                     # args[0] is a singleton tuple that we flatten into multiple
                     # results.
-                    operands = [self._import_argument(loc, arg) for arg in node.args[0]]
+                    operands = [self._import_argument(loc, arg) for arg in node.args[0] if arg is not None]
                     func_dialect.ReturnOp(operands, loc=loc)
 
     def _promote_symbolic_scalar_int_float(self, loc, graph, param):
