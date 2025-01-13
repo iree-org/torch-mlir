@@ -2370,7 +2370,8 @@ LogicalResult ConvertAtenOp<AtenConvolutionOp>::matchAndRewrite(
                                     transposedInput, transformedWeight, bias,
                                     rewriter.getDenseI64ArrayAttr(padding),
                                     rewriter.getDenseI64ArrayAttr(stride),
-                                    rewriter.getDenseI64ArrayAttr(dilation))
+                                    rewriter.getDenseI64ArrayAttr(dilation),
+                                    TypeAttr::get(biasElemTy))
             .getResult();
   } else if (weightShape[1] == 1) {
     // depthwise convolution
@@ -2381,7 +2382,8 @@ LogicalResult ConvertAtenOp<AtenConvolutionOp>::matchAndRewrite(
                 transposedInput, transformedWeight, bias,
                 rewriter.getDenseI64ArrayAttr(padding),
                 rewriter.getDenseI64ArrayAttr(stride),
-                rewriter.getDenseI64ArrayAttr(dilation))
+                rewriter.getDenseI64ArrayAttr(dilation),
+                TypeAttr::get(biasElemTy))
             .getResult();
   } else {
     llvm_unreachable("Unhandled convolution type");
