@@ -152,9 +152,9 @@ Torch::getTypeForScalarType(MLIRContext *context,
   case torch_upstream::ScalarType::Bool:
     return IntegerType::get(context, 1);
   case torch_upstream::ScalarType::BFloat16:
-    return mlir::FloatType::getBF16(context);
+    return mlir::BFloat16Type::get(context);
   case torch_upstream::ScalarType::Half:
-    return mlir::FloatType::getF16(context);
+    return mlir::Float16Type::get(context);
   case torch_upstream::ScalarType::Byte:
     return mlir::IntegerType::get(context, 8, mlir::IntegerType::Unsigned);
   case torch_upstream::ScalarType::Char:
