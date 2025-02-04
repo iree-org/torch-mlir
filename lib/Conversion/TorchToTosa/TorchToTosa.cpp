@@ -3984,10 +3984,11 @@ LogicalResult ConvertAtenOp<AtenSliceTensorOp>::matchAndRewrite(
   startSlice[dim] = start;
   sizeSlice[dim] = end - start;
 
+  Location loc = op.getLoc();
   rewriter.replaceOpWithNewOp<tosa::SliceOp>(
       op, getTypeConverter()->convertType(op.getType()), adaptor.getSelf(),
-      rewriter.getDenseI64ArrayAttr(startSlice),
-      rewriter.getDenseI64ArrayAttr(sizeSlice));
+      tosa::getTosaConstShape(rewriter, loc, startSlice),
+      tosa::getTosaConstShape(rewriter, loc, sizeSlice));
 
   return success();
 }
@@ -7115,10 +7116,11 @@ LogicalResult ConvertAtenOp<AtenDiagonalOp>::matchAndRewrite(
         llvm::to_vector(makeShapeTorchCompatible(transposedInputShape));
     if (offset < 0)
       startSlice[targetDim1] = std::abs(offset);
+    Location loc = op.getLoc();
     diagonalTensor = rewriter.create<tosa::SliceOp>(
-        op->getLoc(), transposedInputType, diagonalTensor,
-        rewriter.getDenseI64ArrayAttr(startSlice),
-        rewriter.getDenseI64ArrayAttr(sizeSlice));
+        loc, transposedInputType, diagonalTensor,
+        tosa::getTosaConstShape(rewriter, loc, startSlice),
+        tosa::getTosaConstShape(rewriter, loc, sizeSlice));
   }
 
   // Apply Reduce Sum to get the result
@@ -7643,8 +7645,9 @@ Value reflectionPadAlongAxis(Value input, ArrayRef<int64_t> unpaddedShape,
     auto leftPadType = RankedTensorType::get(leftPadShape, inputElemTy);
 
     auto leftPadSlice = rewriter.create<tosa::SliceOp>(
-        loc, leftPadType, input, rewriter.getDenseI64ArrayAttr(leftStartSlice),
-        rewriter.getDenseI64ArrayAttr(leftSizeSlice));
+        loc, leftPadType, input,
+        tosa::getTosaConstShape(rewriter, loc, leftStartSlice),
+        tosa::getTosaConstShape(rewriter, loc, leftSizeSlice));
 
     auto leftPad = rewriter.create<tosa::ReverseOp>(
         loc, leftPadType, leftPadSlice.getResult(), static_cast<int32_t>(axis));
@@ -7676,8 +7679,8 @@ Value reflectionPadAlongAxis(Value input, ArrayRef<int64_t> unpaddedShape,
 
     auto rightPadSlice = rewriter.create<tosa::SliceOp>(
         loc, rightPadType, input,
-        rewriter.getDenseI64ArrayAttr(rightStartSlice),
-        rewriter.getDenseI64ArrayAttr(rightSizeSlice));
+        tosa::getTosaConstShape(rewriter, loc, rightStartSlice),
+        tosa::getTosaConstShape(rewriter, loc, rightSizeSlice));
 
     auto rightPad = rewriter.create<tosa::ReverseOp>(
         loc, rightPadType, rightPadSlice.getResult(),
@@ -7921,10 +7924,11 @@ LogicalResult ConvertAtenOp<AtenReplicationPad2dOp>::matchAndRewrite(
     auto leftPadSliceType =
         RankedTensorType::get(leftPadSliceShape, selfElemTy);
 
+    Location loc = op.getLoc();
     auto leftPadSlice = rewriter.create<tosa::SliceOp>(
-        op->getLoc(), leftPadSliceType, self,
-        rewriter.getDenseI64ArrayAttr(leftStartSlice),
-        rewriter.getDenseI64ArrayAttr(leftSizeSlice));
+        loc, leftPadSliceType, self,
+        tosa::getTosaConstShape(rewriter, loc, leftStartSlice),
+        tosa::getTosaConstShape(rewriter, loc, leftSizeSlice));
 
     for (int64_t i = 0; i < paddingLeft; i++)
       sideTensors.push_back(leftPadSlice.getResult());
@@ -7946,10 +7950,11 @@ LogicalResult ConvertAtenOp<AtenReplicationPad2dOp>::matchAndRewrite(
     auto rightPadSliceType =
         RankedTensorType::get(rightPadSliceShape, selfElemTy);
 
+    Location loc = op.getLoc();
     auto rightPadSlice = rewriter.create<tosa::SliceOp>(
-        op->getLoc(), rightPadSliceType, self,
-        rewriter.getDenseI64ArrayAttr(rightStartSlice),
-        rewriter.getDenseI64ArrayAttr(rightSizeSlice));
+        loc, rightPadSliceType, self,
+        tosa::getTosaConstShape(rewriter, loc, rightStartSlice),
+        tosa::getTosaConstShape(rewriter, loc, rightSizeSlice));
 
     for (int64_t i = 0; i < paddingRight; i++)
       sideTensors.push_back(rightPadSlice.getResult());
@@ -7981,10 +7986,11 @@ LogicalResult ConvertAtenOp<AtenReplicationPad2dOp>::matchAndRewrite(
 
     auto topPadSliceType = RankedTensorType::get(topPadSliceShape, selfElemTy);
 
+    Location loc = op.getLoc();
     auto topPadSlice = rewriter.create<tosa::SliceOp>(
-        op->getLoc(), topPadSliceType, selfSidePadded,
-        rewriter.getDenseI64ArrayAttr(topStartSlice),
-        rewriter.getDenseI64ArrayAttr(topSizeSlice));
+        loc, topPadSliceType, selfSidePadded,
+        tosa::getTosaConstShape(rewriter, loc, topStartSlice),
+        tosa::getTosaConstShape(rewriter, loc, topSizeSlice));
 
     for (int64_t i = 0; i < paddingTop; i++)
       resultTensors.push_back(topPadSlice.getResult());
@@ -8009,10 +8015,11 @@ LogicalResult ConvertAtenOp<AtenReplicationPad2dOp>::matchAndRewrite(
     auto bottomPadSliceType =
         RankedTensorType::get(bottomPadSliceShape, selfElemTy);
 
+    Location loc = op.getLoc();
     auto bottomPadSlice = rewriter.create<tosa::SliceOp>(
-        op->getLoc(), bottomPadSliceType, selfSidePadded,
-        rewriter.getDenseI64ArrayAttr(bottomStartSlice),
-        rewriter.getDenseI64ArrayAttr(bottomSizeSlice));
+        loc, bottomPadSliceType, selfSidePadded,
+        tosa::getTosaConstShape(rewriter, loc, bottomStartSlice),
+        tosa::getTosaConstShape(rewriter, loc, bottomSizeSlice));
 
     for (int64_t i = 0; i < paddingBottom; i++)
       resultTensors.push_back(bottomPadSlice.getResult());
