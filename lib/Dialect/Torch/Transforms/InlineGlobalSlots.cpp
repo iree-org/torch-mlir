@@ -32,6 +32,7 @@
 #include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
 #include "torch-mlir/Dialect/Torch/Transforms/Passes.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/LogicalResult.h"
 
 #define DEBUG_TYPE "torch-inline-global-slots"
 
@@ -251,7 +252,9 @@ bool InlineGlobalSlotsAnalysis::isValueSafeTransferFunction(Value value) {
 
 SmallVector<Operation *> getBackwardSliceIncludingRoot(Value initialValue) {
   SetVector<Operation *> sliceSet;
-  getBackwardSlice(initialValue, &sliceSet);
+  [[maybe_unused]] LogicalResult ret =
+      getBackwardSlice(initialValue, &sliceSet);
+  assert(ret.succeeded());
   SmallVector<Operation *> slice;
   llvm::append_range(slice, sliceSet);
   slice.push_back(initialValue.getDefiningOp());
