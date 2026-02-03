@@ -629,6 +629,25 @@ func.func @test_matmulinteger_non_scalar_rhsZp(%arg0: !torch.vtensor<[?,?],ui8>,
 
 // -----
 
+// CHECK-LABEL: func.func @test_multi_head_attention
+func.func @test_multi_head_attention(%query: !torch.vtensor<[2,8,256],f32>, %key: !torch.vtensor<[2,8,256],f32>, %value: !torch.vtensor<[2,8,256],f32>) -> !torch.vtensor<[2,8,256],f32> attributes {torch.onnx_meta.opset_version = 1 : si64} {
+  // CHECK-DAG: %[[BATCH:.*]] = torch.constant.int 2
+  // CHECK-DAG: %[[SEQ:.*]] = torch.constant.int 8
+  // CHECK-DAG: %[[HIDDEN:.*]] = torch.constant.int 256
+  // CHECK-DAG: %[[HEADSIZE:.*]] = torch.constant.int 32
+  // CHECK-DAG: %[[NUMHEADS:.*]] = torch.constant.int 8
+  // CHECK-DAG: %[[NONE:.*]] = torch.constant.none
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.scaled_dot_product_attention
+  // CHECK: torch.aten.reshape
+  %0 = torch.operator "onnx.MultiHeadAttention"(%query, %key, %value) {torch.onnx.num_heads = 8 : si64, torch.onnx.scale = 0.1767766953125 : f32, torch.onnx.unidirectional = 0 : si64} : (!torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>) -> !torch.vtensor<[2,8,256],f32>
+  return %0 : !torch.vtensor<[2,8,256],f32>
+}
+
+// -----
+
 // CHECK-LABEL:   func.func @test_multinomial_default
 func.func @test_multinomial_default(%arg0: !torch.vtensor<[3,5],f64>) -> !torch.vtensor<[3, 1],si32> attributes {torch.onnx_meta.ir_version = 8 : si64, torch.onnx_meta.opset_version = 15 : si64, torch.onnx_meta.producer_name = "backend-test", torch.onnx_meta.producer_version = ""} {
     // CHECK:           %[[VAL_1:.*]] = torch.constant.int 3

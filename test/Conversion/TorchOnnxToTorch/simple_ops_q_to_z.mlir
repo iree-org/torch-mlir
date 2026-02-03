@@ -803,6 +803,26 @@ func.func @test_selu(%arg0: !torch.vtensor<[3,4,5],f32>) -> !torch.vtensor<[3,4,
 
 // -----
 
+// CHECK-LABEL: func.func @test_skip_simplified_layer_normalization
+func.func @test_skip_simplified_layer_normalization(%arg0: !torch.vtensor<[2,8,256],f32>, %arg1: !torch.vtensor<[2,8,256],f32>, %arg2: !torch.vtensor<[256],f32>) -> (!torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>) attributes {torch.onnx_meta.opset_version = 1 : si64} {
+  // CHECK-DAG: %[[ONE:.*]] = torch.constant.float 1
+  // CHECK-DAG: %[[DIM:.*]] = torch.constant.int 2
+  // CHECK-DAG: %[[TRUE:.*]] = torch.constant.bool true
+  // CHECK-DAG: %[[NONE:.*]] = torch.constant.none
+  // CHECK: %[[SUM:.*]] = torch.aten.add.Tensor %arg0, %arg1
+  // CHECK: %[[SQUARED:.*]] = torch.aten.mul.Tensor %[[SUM]], %[[SUM]]
+  // CHECK: torch.aten.mean.dim
+  // CHECK: torch.aten.add.Scalar
+  // CHECK: torch.aten.sqrt
+  // CHECK: torch.aten.expand_as
+  // CHECK: torch.aten.div.Tensor
+  // CHECK: torch.aten.mul.Tensor
+  %0:2 = torch.operator "onnx.SkipSimplifiedLayerNormalization"(%arg0, %arg1, %arg2) {torch.onnx.epsilon = 9.99999974E-6 : f32} : (!torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>, !torch.vtensor<[256],f32>) -> (!torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>)
+  return %0#0, %0#1 : !torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @test_reduce_max_empty_set_fp
 func.func @test_reduce_max_empty_set_fp(%arg0: !torch.vtensor<[2,0,4],f32>, %arg1: !torch.vtensor<[1],si64>) -> !torch.vtensor<[2,1,4],f32> attributes {torch.onnx_meta.ir_version = 9 : si64, torch.onnx_meta.opset_version = 20 : si64, torch.onnx_meta.producer_name = "backend-test", torch.onnx_meta.producer_version = ""} {
   // CHECK-DAG: %[[INF:.+]] = torch.constant.float 0xFFF0000000000000

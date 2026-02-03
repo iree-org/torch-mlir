@@ -64,6 +64,123 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         return success();
       });
   patterns.onOp(
+      "SkipSimplifiedLayerNormalization", 1,
+      [](OpBinder binder, ConversionPatternRewriter &rewriter) {
+        Location loc = binder.getLoc();
+
+        // Bind required operands
+        Value input, skip, gamma;
+        if (binder.tensorOperandAtIndex(input, 0) ||
+            binder.tensorOperandAtIndex(skip, 1) ||
+            binder.tensorOperandAtIndex(gamma, 2))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "Failed to get required inputs");
+
+        // Bind optional bias (index 3)
+        Value bias;
+        bool hasBias = !binder.tensorOperandAtIndex(bias, 3);
+
+        // Bind epsilon attribute
+        float epsilon;
+        if (binder.f32FloatAttr(epsilon, "epsilon", 1e-5f))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "Failed to get epsilon");
+
+        // Get result types (there can be 1 or 2 outputs)
+        SmallVector<Type> resultTypes;
+        if (binder.tensorResultTypes(resultTypes))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "result types bind failure");
+
+        // Get input type to determine shapes and dtype
+        Torch::ValueTensorType inputType =
+            cast<Torch::ValueTensorType>(input.getType());
+        if (!inputType.hasDtype())
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "input should have dtype");
+
+        // Get tensor rank to compute last dimension
+        std::optional<unsigned> maybeRank = Torch::getTensorRank(input);
+        if (!maybeRank)
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "unranked input tensor");
+        unsigned inputRank = *maybeRank;
+        if (inputRank == 0)
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "scalar input not supported");
+
+        // Create constants
+        Value cstOne = Torch::ConstantFloatOp::create(
+            rewriter, loc, rewriter.getF64FloatAttr(1.0));
+        Value cstEpsilon = Torch::ConstantFloatOp::create(
+            rewriter, loc, rewriter.getF64FloatAttr(epsilon));
+        Value cstLastDim = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(inputRank - 1));
+        Value cstTrue = Torch::ConstantBoolOp::create(rewriter, loc, true);
+        Value cstNone = Torch::ConstantNoneOp::create(rewriter, loc);
+
+        // Step 1: Compute s = input + skip + bias (if present)
+        Value s = Torch::AtenAddTensorOp::create(rewriter, loc, inputType,
+                                                 input, skip, cstOne);
+
+        if (hasBias) {
+          s = Torch::AtenAddTensorOp::create(rewriter, loc, inputType, s, bias,
+                                             cstOne);
+        }
+
+        // Step 2: Compute s^2
+        Value sSquared =
+            Torch::AtenMulTensorOp::create(rewriter, loc, inputType, s, s);
+
+        // Step 3: Compute mean(s^2, dim=-1, keepdim=true)
+        // Create dim list with last dimension
+        Value dimList = Torch::PrimListConstructOp::create(
+            rewriter, loc,
+            Torch::ListType::get(Torch::IntType::get(binder.op->getContext())),
+            SmallVector<Value>{cstLastDim});
+
+        // Result type for mean (same shape as input but reduced on last dim)
+        SmallVector<int64_t> meanSizes(inputType.getSizes());
+        if (!meanSizes.empty() && meanSizes.back() != Torch::kUnknownSize)
+          meanSizes.back() = 1; // keepdim=true, so last dim becomes 1
+        Torch::ValueTensorType meanType =
+            cast<Torch::ValueTensorType>(inputType.getWithSizesAndDtype(
+                meanSizes, inputType.getOptionalDtype()));
+
+        Value meanSquared = Torch::AtenMeanDimOp::create(
+            rewriter, loc, meanType, sSquared, dimList, cstTrue, cstNone);
+
+        // Step 4: Compute rms = sqrt(mean(s^2) + epsilon)
+        Value meanPlusEpsilon = Torch::AtenAddScalarOp::create(
+            rewriter, loc, meanType, meanSquared, cstEpsilon, cstOne);
+        Value rms =
+            Torch::AtenSqrtOp::create(rewriter, loc, meanType, meanPlusEpsilon);
+
+        // Step 5: Compute output = (s / rms) * gamma
+        // rms needs to be expanded/broadcasted to match s's shape
+        Value rmsExpanded =
+            Torch::AtenExpandAsOp::create(rewriter, loc, inputType, rms, s);
+
+        Value normalized = Torch::AtenDivTensorOp::create(
+            rewriter, loc, inputType, s, rmsExpanded);
+
+        Value output = Torch::AtenMulTensorOp::create(rewriter, loc, inputType,
+                                                      normalized, gamma);
+
+        // Return outputs
+        if (resultTypes.size() == 1) {
+          rewriter.replaceOp(binder.op, {output});
+        } else if (resultTypes.size() == 2) {
+          // Second output is input_skip_bias_sum (s)
+          rewriter.replaceOp(binder.op, {output, s});
+        } else {
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "expected 1 or 2 result types");
+        }
+
+        return success();
+      });
+  patterns.onOp(
       "GroupQueryAttention", 1,
       [](OpBinder binder, ConversionPatternRewriter &rewriter) {
         SmallVector<Value> operands;
@@ -456,6 +573,168 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         }
 
         rewriter.replaceOp(binder.op, {attention, presentKey, presentValue});
+        return success();
+      });
+  patterns.onOp(
+      "MultiHeadAttention", 1,
+      [](OpBinder binder, ConversionPatternRewriter &rewriter) {
+        Location loc = binder.getLoc();
+        MLIRContext *context = binder.op->getContext();
+
+        // Get all operands as a list (some may be optional/none)
+        SmallVector<Value> operands;
+        if (binder.tensorOperandsList(operands))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "operands bind failure");
+
+        // Get result type
+        Torch::ValueTensorType resultType;
+        if (binder.tensorResultType(resultType))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "result type bind failure");
+
+        // Get attributes
+        int64_t numHeads;
+        float scale;
+        int64_t unidirectional;
+        if (binder.s64IntegerAttr(numHeads, "num_heads"))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "num_heads is required");
+        (void)binder.f32FloatAttr(scale, "scale", 0.0f); // 0 means use default
+        (void)binder.s64IntegerAttr(unidirectional, "unidirectional", 0);
+
+        if (numHeads == 0)
+          return rewriter.notifyMatchFailure(
+              binder.op,
+              "num_heads is a required attribute and should be non-zero");
+
+        if (operands.size() == 0)
+          return rewriter.notifyMatchFailure(
+              binder.op, "At least query input is required");
+
+        // Extract Q, K, V from operands
+        // query (index 0) is required
+        Value query = operands[0];
+        // key (index 1) is optional, defaults to query for self-attention
+        Value key = operands.size() > 1 ? operands[1] : query;
+        // value (index 2) is optional, defaults to key
+        Value value = operands.size() > 2 ? operands[2] : key;
+        // bias/mask (index 3) is optional
+        Value attnBias = operands.size() > 3 ? operands[3] : Value();
+
+        // Get input shape info
+        Torch::ValueTensorType queryType =
+            cast<Torch::ValueTensorType>(query.getType());
+        if (!(queryType.hasSizes() && queryType.areAllSizesKnown()))
+          return rewriter.notifyMatchFailure(
+              binder.op,
+              "Expected `query` input to have statically known sizes");
+
+        SmallVector<int64_t> queryDims{queryType.getSizes()};
+        if (queryDims.size() < 3)
+          return rewriter.notifyMatchFailure(
+              binder.op, "Expected query to have at least 3 dimensions");
+
+        int64_t batchSize = queryDims[0];
+        int64_t sequenceLength = queryDims[1];
+        int64_t hiddenSize = queryDims[2];
+        int64_t headSize = hiddenSize / numHeads;
+
+        if (hiddenSize % numHeads != 0)
+          return rewriter.notifyMatchFailure(
+              binder.op, "hidden_size must be divisible by num_heads");
+
+        // Create constants
+        Value cstBatchSize = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(batchSize));
+        Value cstSequenceLength = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(sequenceLength));
+        Value cstHiddenSize = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(hiddenSize));
+        Value cstHeadSize = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(headSize));
+        Value cstNumHeads = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(numHeads));
+        Value cstNone = Torch::ConstantNoneOp::create(rewriter, loc);
+
+        // Reshape Q, K, V from (batch, seq, hidden) to (batch, num_heads, seq,
+        // head_size)
+        SmallVector<int64_t> reshapeSizesInt{batchSize, numHeads,
+                                             sequenceLength, headSize};
+        Value reshapeSizesList = Torch::PrimListConstructOp::create(
+            rewriter, loc, Torch::ListType::get(Torch::IntType::get(context)),
+            SmallVector<Value>{cstBatchSize, cstNumHeads, cstSequenceLength,
+                               cstHeadSize});
+
+        // Reshape query
+        Value qInput = Torch::AtenReshapeOp::create(
+            rewriter, loc,
+            queryType.getWithSizesAndDtype(reshapeSizesInt,
+                                           queryType.getOptionalDtype()),
+            query, reshapeSizesList);
+
+        // Reshape key
+        Torch::ValueTensorType keyType =
+            cast<Torch::ValueTensorType>(key.getType());
+        Value kInput = Torch::AtenReshapeOp::create(
+            rewriter, loc,
+            keyType.getWithSizesAndDtype(reshapeSizesInt,
+                                         keyType.getOptionalDtype()),
+            key, reshapeSizesList);
+
+        // Reshape value
+        Torch::ValueTensorType valueType =
+            cast<Torch::ValueTensorType>(value.getType());
+        Value vInput = Torch::AtenReshapeOp::create(
+            rewriter, loc,
+            valueType.getWithSizesAndDtype(reshapeSizesInt,
+                                           valueType.getOptionalDtype()),
+            value, reshapeSizesList);
+
+        // Create scale value - if scale is 0, use None for default behavior
+        Value cstScale = cstNone;
+        if (scale != 0.0f) {
+          cstScale = Torch::ConstantFloatOp::create(
+              rewriter, loc, rewriter.getType<Torch::FloatType>(),
+              rewriter.getF64FloatAttr(scale));
+        }
+
+        // Create is_causal based on unidirectional attribute
+        Value isCausal =
+            Torch::ConstantBoolOp::create(rewriter, loc, unidirectional != 0);
+
+        // Handle attention bias/mask if present
+        Value attnMask = cstNone;
+        if (attnBias) {
+          // If attnBias is provided, use it as attn_mask
+          // The shape should be (batch, num_heads, seq_len, seq_len) or
+          // compatible
+          attnMask = attnBias;
+        }
+
+        // Apply scaled dot product attention
+        // enable_gqa should be false for standard MHA (unlike GQA)
+        Value cstEnableGQA =
+            Torch::ConstantBoolOp::create(rewriter, loc, false);
+        Value cstFloatZero = Torch::ConstantFloatOp::create(
+            rewriter, loc, rewriter.getType<Torch::FloatType>(),
+            rewriter.getF64FloatAttr(0.0));
+
+        Value attention = Torch::AtenScaledDotProductAttentionOp::create(
+            rewriter, loc, qInput.getType(), qInput, kInput, vInput,
+            /*attn_mask=*/attnMask,
+            /*dropout_p=*/cstFloatZero, /*is_causal=*/isCausal, cstScale,
+            cstEnableGQA);
+
+        // Reshape output back from (batch, num_heads, seq, head_size)
+        // to (batch, seq, hidden)
+        Value attentionResultSizesList = Torch::PrimListConstructOp::create(
+            rewriter, loc, Torch::ListType::get(Torch::IntType::get(context)),
+            SmallVector<Value>{cstBatchSize, cstSequenceLength, cstHiddenSize});
+        Value output = Torch::AtenReshapeOp::create(
+            rewriter, loc, resultType, attention, attentionResultSizesList);
+
+        rewriter.replaceOp(binder.op, {output});
         return success();
       });
   patterns.onOp(
