@@ -64,6 +64,125 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         return success();
       });
   patterns.onOp(
+      "SimplifiedLayerNormalization", 1,
+      [](OpBinder binder, ConversionPatternRewriter &rewriter) {
+        Location loc = binder.getLoc();
+
+        // Bind required operands: input and scale (gamma)
+        Value input, gamma;
+        if (binder.tensorOperandAtIndex(input, 0) ||
+            binder.tensorOperandAtIndex(gamma, 1))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "Failed to get required inputs");
+
+        // Bind attributes
+        float epsilon;
+        int64_t axis;
+        if (binder.f32FloatAttr(epsilon, "epsilon", 1e-5f))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "Failed to get epsilon");
+        if (binder.s64IntegerAttr(axis, "axis", -1))
+          return rewriter.notifyMatchFailure(binder.op, "Failed to get axis");
+
+        // Get result types (there can be 1 or more outputs)
+        SmallVector<Type> resultTypes;
+        if (binder.tensorResultTypes(resultTypes))
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "result types bind failure");
+
+        // Get input type to determine shapes and dtype
+        Torch::ValueTensorType inputType =
+            cast<Torch::ValueTensorType>(input.getType());
+        if (!inputType.hasDtype())
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "input should have dtype");
+
+        // Get tensor rank to normalize axis
+        std::optional<unsigned> maybeRank = Torch::getTensorRank(input);
+        if (!maybeRank)
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "unranked input tensor");
+        unsigned inputRank = *maybeRank;
+        if (inputRank == 0)
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "scalar input not supported");
+
+        // Normalize negative axis
+        if (axis < 0)
+          axis += inputRank;
+
+        // Create constants
+        Value cstOne = Torch::ConstantFloatOp::create(
+            rewriter, loc, rewriter.getF64FloatAttr(1.0));
+        Value cstEpsilon = Torch::ConstantFloatOp::create(
+            rewriter, loc, rewriter.getF64FloatAttr(epsilon));
+        Value cstAxis = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(axis));
+        Value cstTrue = Torch::ConstantBoolOp::create(rewriter, loc, true);
+        Value cstNone = Torch::ConstantNoneOp::create(rewriter, loc);
+
+        // Step 1: Compute input^2
+        Value inputSquared = Torch::AtenMulTensorOp::create(
+            rewriter, loc, inputType, input, input);
+
+        // Step 2: Compute mean(input^2, dim=axis, keepdim=true)
+        // Create dim list with the axis
+        Value dimList = Torch::PrimListConstructOp::create(
+            rewriter, loc,
+            Torch::ListType::get(Torch::IntType::get(binder.op->getContext())),
+            SmallVector<Value>{cstAxis});
+
+        // Result type for mean (same shape as input but reduced on axis dim)
+        SmallVector<int64_t> meanSizes(inputType.getSizes());
+        if (!meanSizes.empty() &&
+            static_cast<size_t>(axis) < meanSizes.size() &&
+            meanSizes[axis] != Torch::kUnknownSize)
+          meanSizes[axis] = 1; // keepdim=true, so axis dim becomes 1
+        Torch::ValueTensorType meanType =
+            cast<Torch::ValueTensorType>(inputType.getWithSizesAndDtype(
+                meanSizes, inputType.getOptionalDtype()));
+
+        Value meanSquared = Torch::AtenMeanDimOp::create(
+            rewriter, loc, meanType, inputSquared, dimList, cstTrue, cstNone);
+
+        // Step 3: Compute rms = sqrt(mean(input^2) + epsilon)
+        Value meanPlusEpsilon = Torch::AtenAddScalarOp::create(
+            rewriter, loc, meanType, meanSquared, cstEpsilon, cstOne);
+        Value rms =
+            Torch::AtenSqrtOp::create(rewriter, loc, meanType, meanPlusEpsilon);
+
+        // Step 4: Compute output = (input / rms) * gamma
+        // rms needs to be expanded/broadcasted to match input's shape
+        Value rmsExpanded =
+            Torch::AtenExpandAsOp::create(rewriter, loc, inputType, rms, input);
+
+        Value normalized = Torch::AtenDivTensorOp::create(
+            rewriter, loc, inputType, input, rmsExpanded);
+
+        Value output = Torch::AtenMulTensorOp::create(rewriter, loc, inputType,
+                                                      normalized, gamma);
+
+        // Return outputs (may have optional inv_std_var output)
+        if (resultTypes.size() == 1) {
+          rewriter.replaceOp(binder.op, {output});
+        } else if (resultTypes.size() == 2) {
+          // Second output is inv_std_var (1/rms)
+          Value invStdVar =
+              Torch::AtenReciprocalOp::create(rewriter, loc, meanType, rms);
+          rewriter.replaceOp(binder.op, {output, invStdVar});
+        } else if (resultTypes.size() == 3) {
+          // Third output is mean (not typically used but part of spec)
+          Value invStdVar =
+              Torch::AtenReciprocalOp::create(rewriter, loc, meanType, rms);
+          rewriter.replaceOp(binder.op, {output, invStdVar, meanSquared});
+        } else {
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "expected 1-3 result types");
+        }
+
+        return success();
+      });
+  patterns.onOp(
       "SkipSimplifiedLayerNormalization", 1,
       [](OpBinder binder, ConversionPatternRewriter &rewriter) {
         Location loc = binder.getLoc();

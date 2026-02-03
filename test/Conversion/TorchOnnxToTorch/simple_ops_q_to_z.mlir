@@ -803,6 +803,41 @@ func.func @test_selu(%arg0: !torch.vtensor<[3,4,5],f32>) -> !torch.vtensor<[3,4,
 
 // -----
 
+// CHECK-LABEL: func.func @test_simplified_layer_normalization
+func.func @test_simplified_layer_normalization(%arg0: !torch.vtensor<[2,8,256],f32>, %arg1: !torch.vtensor<[256],f32>) -> !torch.vtensor<[2,8,256],f32> attributes {torch.onnx_meta.opset_version = 1 : si64} {
+  // CHECK-DAG: %[[ONE:.*]] = torch.constant.float 1
+  // CHECK-DAG: %[[AXIS:.*]] = torch.constant.int 2
+  // CHECK-DAG: %[[TRUE:.*]] = torch.constant.bool true
+  // CHECK-DAG: %[[NONE:.*]] = torch.constant.none
+  // CHECK: %[[SQUARED:.*]] = torch.aten.mul.Tensor %arg0, %arg0
+  // CHECK: torch.aten.mean.dim
+  // CHECK: torch.aten.add.Scalar
+  // CHECK: torch.aten.sqrt
+  // CHECK: torch.aten.expand_as
+  // CHECK: torch.aten.div.Tensor
+  // CHECK: torch.aten.mul.Tensor
+  %0 = torch.operator "onnx.SimplifiedLayerNormalization"(%arg0, %arg1) {torch.onnx.axis = -1 : si64, torch.onnx.epsilon = 9.99999974E-6 : f32} : (!torch.vtensor<[2,8,256],f32>, !torch.vtensor<[256],f32>) -> !torch.vtensor<[2,8,256],f32>
+  return %0 : !torch.vtensor<[2,8,256],f32>
+}
+
+// -----
+
+// Test SimplifiedLayerNormalization with dynamic shapes (common in real models)
+// CHECK-LABEL: func.func @test_simplified_layer_normalization_dynamic
+func.func @test_simplified_layer_normalization_dynamic(%arg0: !torch.vtensor<[?,?,4096],f16>, %arg1: !torch.vtensor<[4096],f16>) -> !torch.vtensor<[?,?,4096],f16> attributes {torch.onnx_meta.opset_version = 1 : si64} {
+  // CHECK: torch.aten.mul.Tensor %arg0, %arg0
+  // CHECK: torch.aten.mean.dim
+  // CHECK: torch.aten.add.Scalar
+  // CHECK: torch.aten.sqrt
+  // CHECK: torch.aten.expand_as
+  // CHECK: torch.aten.div.Tensor
+  // CHECK: torch.aten.mul.Tensor
+  %0 = torch.operator "onnx.SimplifiedLayerNormalization"(%arg0, %arg1) {torch.onnx.axis = -1 : si64, torch.onnx.epsilon = 1.000000e-05 : f32, torch.onnx.stash_type = 1 : si64} : (!torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[4096],f16>) -> !torch.vtensor<[?,?,4096],f16>
+  return %0 : !torch.vtensor<[?,?,4096],f16>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @test_skip_simplified_layer_normalization
 func.func @test_skip_simplified_layer_normalization(%arg0: !torch.vtensor<[2,8,256],f32>, %arg1: !torch.vtensor<[2,8,256],f32>, %arg2: !torch.vtensor<[256],f32>) -> (!torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>) attributes {torch.onnx_meta.opset_version = 1 : si64} {
   // CHECK-DAG: %[[ONE:.*]] = torch.constant.float 1
