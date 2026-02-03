@@ -631,12 +631,11 @@ func.func @test_matmulinteger_non_scalar_rhsZp(%arg0: !torch.vtensor<[?,?],ui8>,
 
 // CHECK-LABEL: func.func @test_multi_head_attention
 func.func @test_multi_head_attention(%query: !torch.vtensor<[2,8,256],f32>, %key: !torch.vtensor<[2,8,256],f32>, %value: !torch.vtensor<[2,8,256],f32>) -> !torch.vtensor<[2,8,256],f32> attributes {torch.onnx_meta.opset_version = 1 : si64} {
-  // CHECK-DAG: %[[BATCH:.*]] = torch.constant.int 2
-  // CHECK-DAG: %[[SEQ:.*]] = torch.constant.int 8
-  // CHECK-DAG: %[[HIDDEN:.*]] = torch.constant.int 256
   // CHECK-DAG: %[[HEADSIZE:.*]] = torch.constant.int 32
   // CHECK-DAG: %[[NUMHEADS:.*]] = torch.constant.int 8
-  // CHECK-DAG: %[[NONE:.*]] = torch.constant.none
+  // CHECK-DAG: %[[HIDDEN:.*]] = torch.constant.int 256
+  // CHECK: torch.aten.size.int
+  // CHECK: torch.aten.size.int
   // CHECK: torch.aten.reshape
   // CHECK: torch.aten.reshape
   // CHECK: torch.aten.reshape
@@ -644,6 +643,25 @@ func.func @test_multi_head_attention(%query: !torch.vtensor<[2,8,256],f32>, %key
   // CHECK: torch.aten.reshape
   %0 = torch.operator "onnx.MultiHeadAttention"(%query, %key, %value) {torch.onnx.num_heads = 8 : si64, torch.onnx.scale = 0.1767766953125 : f32, torch.onnx.unidirectional = 0 : si64} : (!torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>, !torch.vtensor<[2,8,256],f32>) -> !torch.vtensor<[2,8,256],f32>
   return %0 : !torch.vtensor<[2,8,256],f32>
+}
+
+// -----
+
+// Test MultiHeadAttention with dynamic batch and sequence dimensions (common in real models)
+// CHECK-LABEL: func.func @test_multi_head_attention_dynamic
+func.func @test_multi_head_attention_dynamic(%query: !torch.vtensor<[?,?,4096],f16>, %key: !torch.vtensor<[?,?,4096],f16>, %value: !torch.vtensor<[?,?,4096],f16>, %mask: !torch.vtensor<[?,32,?,?],f16>) -> !torch.vtensor<[?,?,4096],f16> attributes {torch.onnx_meta.opset_version = 1 : si64} {
+  // CHECK-DAG: %[[HEADSIZE:.*]] = torch.constant.int 128
+  // CHECK-DAG: %[[NUMHEADS:.*]] = torch.constant.int 32
+  // CHECK-DAG: %[[HIDDEN:.*]] = torch.constant.int 4096
+  // CHECK: torch.aten.size.int
+  // CHECK: torch.aten.size.int
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.scaled_dot_product_attention
+  // CHECK: torch.aten.reshape
+  %0 = torch.operator "onnx.MultiHeadAttention"(%query, %key, %value, %mask) {torch.onnx.num_heads = 32 : si64, torch.onnx.scale = 8.838835e-02 : f32, torch.onnx.unidirectional = 0 : si64} : (!torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[?,32,?,?],f16>) -> !torch.vtensor<[?,?,4096],f16>
+  return %0 : !torch.vtensor<[?,?,4096],f16>
 }
 
 // -----

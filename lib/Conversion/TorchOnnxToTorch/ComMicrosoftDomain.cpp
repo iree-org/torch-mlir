@@ -622,40 +622,52 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         // bias/mask (index 3) is optional
         Value attnBias = operands.size() > 3 ? operands[3] : Value();
 
-        // Get input shape info
+        // Get input shape info - only hidden_size needs to be static
         Torch::ValueTensorType queryType =
             cast<Torch::ValueTensorType>(query.getType());
-        if (!(queryType.hasSizes() && queryType.areAllSizesKnown()))
-          return rewriter.notifyMatchFailure(
-              binder.op,
-              "Expected `query` input to have statically known sizes");
+        if (!queryType.hasSizes())
+          return rewriter.notifyMatchFailure(binder.op,
+                                             "Expected query to have sizes");
 
         SmallVector<int64_t> queryDims{queryType.getSizes()};
         if (queryDims.size() < 3)
           return rewriter.notifyMatchFailure(
               binder.op, "Expected query to have at least 3 dimensions");
 
-        int64_t batchSize = queryDims[0];
-        int64_t sequenceLength = queryDims[1];
+        // hidden_size must be static to compute head_size
         int64_t hiddenSize = queryDims[2];
-        int64_t headSize = hiddenSize / numHeads;
+        if (hiddenSize == Torch::kUnknownSize)
+          return rewriter.notifyMatchFailure(
+              binder.op, "hidden_size (last dimension) must be static");
 
         if (hiddenSize % numHeads != 0)
           return rewriter.notifyMatchFailure(
               binder.op, "hidden_size must be divisible by num_heads");
 
-        // Create constants
-        Value cstBatchSize = Torch::ConstantIntOp::create(
-            rewriter, loc, rewriter.getI64IntegerAttr(batchSize));
-        Value cstSequenceLength = Torch::ConstantIntOp::create(
-            rewriter, loc, rewriter.getI64IntegerAttr(sequenceLength));
-        Value cstHiddenSize = Torch::ConstantIntOp::create(
-            rewriter, loc, rewriter.getI64IntegerAttr(hiddenSize));
+        int64_t headSize = hiddenSize / numHeads;
+
+        // batch and sequence dimensions can be dynamic
+        int64_t batchSize = queryDims[0];
+        int64_t sequenceLength = queryDims[1];
+
+        // Create constants for static values
         Value cstHeadSize = Torch::ConstantIntOp::create(
             rewriter, loc, rewriter.getI64IntegerAttr(headSize));
         Value cstNumHeads = Torch::ConstantIntOp::create(
             rewriter, loc, rewriter.getI64IntegerAttr(numHeads));
+        Value cstHiddenSize = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(hiddenSize));
         Value cstNone = Torch::ConstantNoneOp::create(rewriter, loc);
+
+        // Get batch and sequence dimensions dynamically
+        Value cstZero = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(0));
+        Value cstOne = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(1));
+        Value batchSizeVal = Torch::AtenSizeIntOp::create(
+            rewriter, loc, rewriter.getType<Torch::IntType>(), query, cstZero);
+        Value seqLenVal = Torch::AtenSizeIntOp::create(
+            rewriter, loc, rewriter.getType<Torch::IntType>(), query, cstOne);
 
         // Reshape Q, K, V from (batch, seq, hidden) to (batch, num_heads, seq,
         // head_size)
@@ -663,7 +675,7 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                                              sequenceLength, headSize};
         Value reshapeSizesList = Torch::PrimListConstructOp::create(
             rewriter, loc, Torch::ListType::get(Torch::IntType::get(context)),
-            SmallVector<Value>{cstBatchSize, cstNumHeads, cstSequenceLength,
+            SmallVector<Value>{batchSizeVal, cstNumHeads, seqLenVal,
                                cstHeadSize});
 
         // Reshape query
@@ -730,7 +742,7 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         // to (batch, seq, hidden)
         Value attentionResultSizesList = Torch::PrimListConstructOp::create(
             rewriter, loc, Torch::ListType::get(Torch::IntType::get(context)),
-            SmallVector<Value>{cstBatchSize, cstSequenceLength, cstHiddenSize});
+            SmallVector<Value>{batchSizeVal, seqLenVal, cstHiddenSize});
         Value output = Torch::AtenReshapeOp::create(
             rewriter, loc, resultType, attention, attentionResultSizesList);
 
