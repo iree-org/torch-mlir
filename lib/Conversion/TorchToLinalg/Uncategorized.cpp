@@ -4061,6 +4061,29 @@ private:
 
     Value result = rotaryEmbedding;
 
+    // Apply scale if not 1.0
+    if (scale != 1.0) {
+      Value scaleVal = arith::ConstantOp::create(
+          rewriter, loc, rewriter.getFloatAttr(elementType, scale));
+      // Create output tensor with same shape as input
+      Value scaledOutTensor =
+          tensor::EmptyOp::create(rewriter, loc, resultDimsOFR, elementType);
+      result = linalg::GenericOp::create(
+                   rewriter, loc, processedInputType, ValueRange{result},
+                   scaledOutTensor,
+                   SmallVector<AffineMap>{
+                       AffineMap::getMultiDimIdentityMap(4, context),
+                       AffineMap::getMultiDimIdentityMap(4, context)},
+                   SmallVector<utils::IteratorType>(
+                       4, utils::IteratorType::parallel),
+                   [&](OpBuilder &builder, Location loc, ValueRange args) {
+                     Value scaled =
+                         arith::MulFOp::create(builder, loc, args[0], scaleVal);
+                     linalg::YieldOp::create(builder, loc, scaled);
+                   })
+                   .getResult(0);
+    }
+
     if (needsReshape) {
       // Reshape (batch, num_heads, seq, head_size) -> (batch, seq, hidden)
       // Use original input dims to preserve dynamic info

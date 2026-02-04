@@ -486,6 +486,32 @@ func.func @test_rotary_embedding_rank3_dynamic(%arg0: !torch.vtensor<[?,?,6],f32
 
 // -----
 
+// Test rotary embedding with scale != 1.0
+// CHECK-LABEL:   func.func @test_rotary_embedding_with_scale(
+// CHECK-SAME:                                     %[[VAL_0:.*]]: !torch.vtensor<[1,3,2,6],f32>,
+// CHECK-SAME:                                     %[[VAL_1:.*]]: !torch.vtensor<[1,2],si64>,
+// CHECK-SAME:                                     %[[VAL_2:.*]]: !torch.vtensor<[4,3],f32>,
+// CHECK-SAME:                                     %[[VAL_3:.*]]: !torch.vtensor<[4,3],f32>) -> !torch.vtensor<[1,3,2,6],f32>
+func.func @test_rotary_embedding_with_scale(%arg0: !torch.vtensor<[1,3,2,6],f32>, %arg1: !torch.vtensor<[1,2],si64>, %arg2: !torch.vtensor<[4,3],f32>, %arg3: !torch.vtensor<[4,3],f32>) -> !torch.vtensor<[1,3,2,6],f32> attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
+  // CHECK: linalg.generic
+  // CHECK: } -> tensor<1x3x2x6xf32>
+  // CHECK: arith.constant 2.000000e+00 : f32
+  // CHECK: linalg.generic {{.*}} ins({{.*}}tensor<1x3x2x6xf32>{{.*}}) outs({{.*}}tensor<1x3x2x6xf32>{{.*}})
+  // CHECK: arith.mulf
+  // CHECK: linalg.yield
+  // CHECK: } -> tensor<1x3x2x6xf32>
+  %none = torch.constant.none
+  %int0 = torch.constant.int 0
+  %int0_0 = torch.constant.int 0
+  %int0_1 = torch.constant.int 0
+  %int0_2 = torch.constant.int 0
+  %float2.000000e00 = torch.constant.float 2.000000e+00
+  %4 = torch.onnx.rotary_embedding %arg0, %arg1, %arg2, %arg3, %int0, %int0_0, %int0_1, %int0_2, %float2.000000e00 : !torch.vtensor<[1,3,2,6],f32>, !torch.vtensor<[1,2],si64>, !torch.vtensor<[4,3],f32>, !torch.vtensor<[4,3],f32>, !torch.int, !torch.int, !torch.int, !torch.int, !torch.float -> !torch.vtensor<[1,3,2,6],f32>
+  return %4 : !torch.vtensor<[1,3,2,6],f32>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @torch.ops.aten.replication_pad3d$basic(
 // CHECK-SAME: %[[ARG_0:.*]]: !torch.vtensor<[4,3,5],f32>) -> !torch.vtensor<[7,7,6],f32>
 // CHECK: %[[T0:.*]] = torch_c.to_builtin_tensor %[[ARG0]] : !torch.vtensor<[4,3,5],f32> -> tensor<4x3x5xf32>

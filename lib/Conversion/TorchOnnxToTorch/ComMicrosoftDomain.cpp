@@ -286,15 +286,24 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         Value output = Torch::AtenMulTensorOp::create(rewriter, loc, inputType,
                                                       normalized, gamma);
 
-        // Return outputs
+        // Compute inv_std_var = 1/rms when needed
+        Value invStdVar;
+        if (resultTypes.size() >= 3) {
+          invStdVar =
+              Torch::AtenReciprocalOp::create(rewriter, loc, meanType, rms);
+        }
+
         if (resultTypes.size() == 1) {
           rewriter.replaceOp(binder.op, {output});
         } else if (resultTypes.size() == 2) {
-          // Second output is input_skip_bias_sum (s)
-          rewriter.replaceOp(binder.op, {output, s});
+          rewriter.replaceOp(binder.op, {output, meanSquared}); // mean
+        } else if (resultTypes.size() == 3) {
+          rewriter.replaceOp(binder.op, {output, meanSquared, invStdVar});
+        } else if (resultTypes.size() == 4) {
+          rewriter.replaceOp(binder.op, {output, meanSquared, invStdVar, s});
         } else {
           return rewriter.notifyMatchFailure(binder.op,
-                                             "expected 1 or 2 result types");
+                                             "expected 1-4 result types");
         }
 
         return success();
@@ -704,7 +713,7 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
               /*repeats=*/repeatValuesList);
 
           Value cstIntMinusOne = Torch::ConstantIntOp::create(
-              rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
+              rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(-1));
           Value viewSizeList = Torch::PrimListConstructOp::create(
               rewriter, binder.getLoc(),
               Torch::ListType::get(Torch::IntType::get(context)),
@@ -1060,11 +1069,27 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         // query (index 0) is required
         Value query = operands[0];
         // key (index 1) is optional, defaults to query for self-attention
-        Value key = operands.size() > 1 ? operands[1] : query;
+        Value key = operands.size() > 1 && operands[1] ? operands[1] : query;
         // value (index 2) is optional, defaults to key
-        Value value = operands.size() > 2 ? operands[2] : key;
-        // bias/mask (index 3) is optional
-        Value attnBias = operands.size() > 3 ? operands[3] : Value();
+        Value value = operands.size() > 2 && operands[2] ? operands[2] : key;
+
+        // Index 3: bias (projection bias) - not supported yet
+        if (operands.size() > 3 && operands[3] &&
+            !isa<Torch::NoneType>(operands[3].getType()))
+          return rewriter.notifyMatchFailure(
+              binder.op, "projection bias (input 3) not yet supported");
+
+        // Index 4: key_padding_mask - not supported yet
+        if (operands.size() > 4 && operands[4] &&
+            !isa<Torch::NoneType>(operands[4].getType()))
+          return rewriter.notifyMatchFailure(
+              binder.op, "key_padding_mask (input 4) not yet supported");
+
+        // Index 5: attention_bias - pass through as attn_mask
+        Value attnBias;
+        if (operands.size() > 5 && operands[5] &&
+            !isa<Torch::NoneType>(operands[5].getType()))
+          attnBias = operands[5];
 
         // Get input shape info - only hidden_size needs to be static
         Torch::ValueTensorType queryType =

@@ -660,8 +660,33 @@ func.func @test_multi_head_attention_dynamic(%query: !torch.vtensor<[?,?,4096],f
   // CHECK: torch.aten.reshape
   // CHECK: torch.aten.scaled_dot_product_attention
   // CHECK: torch.aten.reshape
-  %0 = torch.operator "onnx.MultiHeadAttention"(%query, %key, %value, %mask) {torch.onnx.num_heads = 32 : si64, torch.onnx.scale = 8.838835e-02 : f32, torch.onnx.unidirectional = 0 : si64} : (!torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[?,32,?,?],f16>) -> !torch.vtensor<[?,?,4096],f16>
+  %none = torch.constant.none
+  %0 = torch.operator "onnx.MultiHeadAttention"(%query, %key, %value, %none, %none, %mask) {torch.onnx.num_heads = 32 : si64, torch.onnx.scale = 8.838835e-02 : f32, torch.onnx.unidirectional = 0 : si64} : (!torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[?,?,4096],f16>, !torch.vtensor<[?,?,4096],f16>, !torch.none, !torch.none, !torch.vtensor<[?,32,?,?],f16>) -> !torch.vtensor<[?,?,4096],f16>
   return %0 : !torch.vtensor<[?,?,4096],f16>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @test_multi_head_attention_with_attention_bias
+func.func @test_multi_head_attention_with_attention_bias(
+    %query: !torch.vtensor<[2,8,64],f32>,
+    %key: !torch.vtensor<[2,8,64],f32>,
+    %value: !torch.vtensor<[2,8,64],f32>,
+    %attention_bias: !torch.vtensor<[2,4,8,8],f32>
+) -> !torch.vtensor<[2,8,64],f32> attributes {torch.onnx_meta.ir_version = 9 : si64, torch.onnx_meta.opset_version = 17 : si64} {
+  // CHECK-DAG: %[[HEADSIZE:.*]] = torch.constant.int 16
+  // CHECK-DAG: %[[NUMHEADS:.*]] = torch.constant.int 4
+  // CHECK-DAG: %[[HIDDEN:.*]] = torch.constant.int 64
+  // CHECK: torch.aten.size.int
+  // CHECK: torch.aten.size.int
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.reshape
+  // CHECK: torch.aten.scaled_dot_product_attention
+  // CHECK: torch.aten.reshape
+  %none = torch.constant.none
+  %0 = torch.operator "onnx.MultiHeadAttention"(%query, %key, %value, %none, %none, %attention_bias) {torch.onnx.num_heads = 4 : si64} : (!torch.vtensor<[2,8,64],f32>, !torch.vtensor<[2,8,64],f32>, !torch.vtensor<[2,8,64],f32>, !torch.none, !torch.none, !torch.vtensor<[2,4,8,8],f32>) -> !torch.vtensor<[2,8,64],f32>
+  return %0 : !torch.vtensor<[2,8,64],f32>
 }
 
 // -----
@@ -2732,4 +2757,35 @@ func.func @test_group_query_attention_prefill_mask_shape(%query: !torch.vtensor<
   %total_seq_len = torch.operator "onnx.Constant"() {torch.onnx.value = dense<5> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
   %0:3 = torch.operator "onnx.GroupQueryAttention"(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64} : (!torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,3,8],f32>, !torch.vtensor<[1,2,3,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>) -> (!torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>)
   return %0#0, %0#1, %0#2 : !torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>
+}
+
+// -----
+
+// Test GroupQueryAttention position ID calculation with rotary embeddings
+// seq_len=4 (multi-token prefill), past_seq_len=3, do_rotary=1
+// Verifies position IDs are computed correctly: past_seqlens=3, total_seqlens=7
+// Position IDs should be [3, 4, 5, 6] for the 4 tokens
+// CHECK-LABEL: func.func @test_group_query_attention_position_ids
+func.func @test_group_query_attention_position_ids(%query: !torch.vtensor<[1,4,16],f32>, %key: !torch.vtensor<[1,4,16],f32>, %value: !torch.vtensor<[1,4,16],f32>, %past_key: !torch.vtensor<[1,2,3,8],f32>, %past_value: !torch.vtensor<[1,2,3,8],f32>, %cos_cache: !torch.vtensor<[2,4],f32>, %sin_cache: !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,7,8],f32>, !torch.vtensor<[1,2,7,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
+  // CHECK: torch.aten.reshape %arg0, {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
+  // CHECK: torch.aten.reshape %arg1, {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
+  // CHECK: torch.aten.reshape %arg2, {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
+  // Verify position ID calculation: arange, add past_seqlens, where condition
+  // CHECK: torch.aten.arange {{.*}} -> !torch.vtensor<[4],si64>
+  // CHECK: torch.aten.repeat {{.*}} -> !torch.vtensor<[1,4],si64>
+  // CHECK: torch.aten.add.Tensor {{.*}} -> !torch.vtensor<[1,4],si64>
+  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,4],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,4],si64>
+  // Verify rotary embedding is applied with position IDs
+  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
+  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
+  // CHECK: torch.prim.ListConstruct %arg3, {{.*}} -> !torch.list<vtensor>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,7,8],f32>
+  // CHECK: torch.prim.ListConstruct %arg4, {{.*}} -> !torch.list<vtensor>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,7,8],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
+  %seqlens_k = torch.operator "onnx.Constant"() {torch.onnx.value = dense<3> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
+  %total_seq_len = torch.operator "onnx.Constant"() {torch.onnx.value = dense<7> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
+  %0:3 = torch.operator "onnx.GroupQueryAttention"(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len, %cos_cache, %sin_cache) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64, torch.onnx.do_rotary = 1 : si64} : (!torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,3,8],f32>, !torch.vtensor<[1,2,3,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>, !torch.vtensor<[2,4],f32>, !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,7,8],f32>, !torch.vtensor<[1,2,7,8],f32>)
+  return %0#0, %0#1, %0#2 : !torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,7,8],f32>, !torch.vtensor<[1,2,7,8],f32>
 }
