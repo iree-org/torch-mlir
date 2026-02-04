@@ -815,10 +815,13 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         Value presentValue = Torch::AtenCatOp::create(
             rewriter, loc, resultTypes[2], valueList, cstConcatDim);
 
-        // Generate attention mask from seqlens_k to mask out invalid KV
-        // positions. The mask prevents attending to positions beyond the valid
-        // sequence length (seqlens_k + seq_q) for each batch element.
-        // Mask shape: [batch, 1, 1, total_kv_seq] where invalid positions are
+        // Generate attention mask combining:
+        // 1. Valid length mask: mask out positions beyond seqlens_k + seq_q
+        // 2. Causal mask: each query position can only attend to positions up
+        //    to past_len + q (where past_len = seqlens_k, q is query position)
+        //
+        // Per ONNX GQA spec: "Only supports causal and local attention."
+        // Mask shape: [batch, 1, seqLen, kvSeqLen] where masked positions are
         // -inf.
         Value attnMask = cstNone;
 
@@ -832,8 +835,6 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
           // Only generate mask if KV sequence length is dynamic or > 0
           // For dynamic shapes or non-trivial sequences, we need to mask
           if (kvSeqLen == Torch::kUnknownSize || kvSeqLen > 0) {
-            // Get the total valid sequence length: seqlens_k + seq_q
-            // For single token generation, this is seqlens_k + 1
             // seqlens_k is already converted to i64 dtype in rotary section,
             // but we need to handle non-rotary case too
             Value seqlensKInt64 = seqlensK;
@@ -854,15 +855,8 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                   /*copy=*/cstFalse, /*memory_format=*/cstNone);
             }
 
-            // total_valid_len = seqlens_k + 1 (per batch element)
-            // Per ONNX spec, seqlens_k is "Equivalent to
-            // (total_sequence_lengths - 1)" so seqlens_k + 1 gives the total
-            // valid KV sequence length.
             Value cstIntOne = Torch::ConstantIntOp::create(
                 rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
-            Value totalValidLen = Torch::AtenAddScalarOp::create(
-                rewriter, loc, seqlensKInt64.getType(), seqlensKInt64,
-                cstIntOne, cstIntOne);
 
             // Get KV sequence dimension size
             Value cstDim2 = Torch::ConstantIntOp::create(
@@ -871,44 +865,101 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                 rewriter, loc, rewriter.getType<Torch::IntType>(), presentKey,
                 cstDim2);
 
-            // Create range tensor [0, 1, 2, ..., kvSeqLen-1]
+            // Create range tensors for causal mask computation
             Value cstInt64Dtype = Torch::ConstantIntOp::create(
                 rewriter, binder.getLoc(),
                 rewriter.getI64IntegerAttr(
                     (int)torch_upstream::ScalarType::Long));
+
+            // kRange: [0, 1, 2, ..., kvSeqLen-1] shape [kvSeqLen]
             Torch::ValueTensorType rangeType = Torch::ValueTensorType::get(
                 context, {kvSeqLen},
                 rewriter.getIntegerType(64, /*isSigned=*/true));
-            Value posRange = Torch::AtenArangeOp::create(
+            Value kRange = Torch::AtenArangeOp::create(
                 rewriter, loc, rangeType, kvSeqLenVal, cstInt64Dtype,
                 /*layout=*/cstNone, /*device=*/cstNone, /*pin_memory=*/cstNone);
 
-            // Reshape totalValidLen to [batch, 1] for broadcasting
+            // qRange: [0, 1, 2, ..., seqLen-1] shape [seqLen]
+            Torch::ValueTensorType qRangeType = Torch::ValueTensorType::get(
+                context, {sequenceLength},
+                rewriter.getIntegerType(64, /*isSigned=*/true));
+            Value qRange = Torch::AtenArangeOp::create(
+                rewriter, loc, qRangeType, cstSequenceLength, cstInt64Dtype,
+                /*layout=*/cstNone, /*device=*/cstNone, /*pin_memory=*/cstNone);
+
+            // Reshape for broadcasting:
+            // seqlensK: [batch] -> [batch, 1, 1] for broadcasting
+            // qRange: [seqLen] -> [1, seqLen, 1]
+            // kRange: [kvSeqLen] -> [1, 1, kvSeqLen]
             Value cstMinusOne = Torch::ConstantIntOp::create(
                 rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(-1));
-            Value viewSizeList = Torch::PrimListConstructOp::create(
+
+            // seqlensK -> [batch, 1, 1]
+            Value seqlensViewList = Torch::PrimListConstructOp::create(
                 rewriter, loc,
                 rewriter.getType<Torch::ListType>(
                     rewriter.getType<Torch::IntType>()),
-                SmallVector<Value>{cstMinusOne, cstIntOne});
-            SmallVector<int64_t> validLenViewSizes{batchSize, 1};
-            Torch::ValueTensorType validLenViewType =
+                SmallVector<Value>{cstMinusOne, cstIntOne, cstIntOne});
+            SmallVector<int64_t> seqlensViewSizes{batchSize, 1, 1};
+            Torch::ValueTensorType seqlensViewType =
                 Torch::ValueTensorType::get(
-                    context, validLenViewSizes,
+                    context, seqlensViewSizes,
                     rewriter.getIntegerType(64, /*isSigned=*/true));
-            Value totalValidLenView = Torch::AtenViewOp::create(
-                rewriter, loc, validLenViewType, totalValidLen, viewSizeList);
+            Value seqlensKView = Torch::AtenViewOp::create(
+                rewriter, loc, seqlensViewType, seqlensKInt64, seqlensViewList);
 
-            // Compare: mask_bool[b, k] = (k < totalValidLen[b])
-            // Result shape: [batch, kvSeqLen]
-            SmallVector<int64_t> maskBoolSizes{batchSize, kvSeqLen};
+            // qRange -> [1, seqLen, 1]
+            Value qViewList = Torch::PrimListConstructOp::create(
+                rewriter, loc,
+                rewriter.getType<Torch::ListType>(
+                    rewriter.getType<Torch::IntType>()),
+                SmallVector<Value>{cstIntOne, cstMinusOne, cstIntOne});
+            SmallVector<int64_t> qViewSizes{1, sequenceLength, 1};
+            Torch::ValueTensorType qViewType = Torch::ValueTensorType::get(
+                context, qViewSizes,
+                rewriter.getIntegerType(64, /*isSigned=*/true));
+            Value qRangeView = Torch::AtenViewOp::create(
+                rewriter, loc, qViewType, qRange, qViewList);
+
+            // kRange -> [1, 1, kvSeqLen]
+            Value kViewList = Torch::PrimListConstructOp::create(
+                rewriter, loc,
+                rewriter.getType<Torch::ListType>(
+                    rewriter.getType<Torch::IntType>()),
+                SmallVector<Value>{cstIntOne, cstIntOne, cstMinusOne});
+            SmallVector<int64_t> kViewSizes{1, 1, kvSeqLen};
+            Torch::ValueTensorType kViewType = Torch::ValueTensorType::get(
+                context, kViewSizes,
+                rewriter.getIntegerType(64, /*isSigned=*/true));
+            Value kRangeView = Torch::AtenViewOp::create(
+                rewriter, loc, kViewType, kRange, kViewList);
+
+            // Compute causal mask: k <= seqlens_k + q
+            // Equivalently: k - seqlens_k <= q, or k <= seqlens_k + q
+            // This allows query at position q to attend to KV positions 0..
+            // (seqlens_k + q), which gives proper causal behavior considering
+            // the past KV cache.
+            //
+            // seqlens_k + q: [batch, 1, 1] + [1, seqLen, 1] -> [batch, seqLen,
+            // 1]
+            SmallVector<int64_t> seqlensQSizes{batchSize, sequenceLength, 1};
+            Torch::ValueTensorType seqlensQType = Torch::ValueTensorType::get(
+                context, seqlensQSizes,
+                rewriter.getIntegerType(64, /*isSigned=*/true));
+            Value seqlensKPlusQ = Torch::AtenAddTensorOp::create(
+                rewriter, loc, seqlensQType, seqlensKView, qRangeView,
+                cstIntOne);
+
+            // k <= seqlens_k + q: [1, 1, kvSeqLen] <= [batch, seqLen, 1]
+            // -> [batch, seqLen, kvSeqLen]
+            SmallVector<int64_t> maskBoolSizes{batchSize, sequenceLength,
+                                               kvSeqLen};
             Torch::ValueTensorType maskBoolType = Torch::ValueTensorType::get(
                 context, maskBoolSizes, rewriter.getI1Type());
-            Value maskBool = Torch::AtenLtTensorOp::create(
-                rewriter, loc, maskBoolType, posRange, totalValidLenView);
+            Value causalMask = Torch::AtenLeTensorOp::create(
+                rewriter, loc, maskBoolType, kRangeView, seqlensKPlusQ);
 
             // Convert bool mask to float mask: True -> 0, False -> -inf
-            // where_self(mask, 0, -inf)
             Value cstZeroFloat = Torch::ConstantFloatOp::create(
                 rewriter, binder.getLoc(), rewriter.getType<Torch::FloatType>(),
                 rewriter.getF64FloatAttr(0.0));
@@ -917,7 +968,6 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                 rewriter.getF64FloatAttr(
                     -std::numeric_limits<double>::infinity()));
 
-            // Create scalar tensors for where operation
             Value cstFloatDtype = Torch::ConstantIntOp::create(
                 rewriter, binder.getLoc(),
                 rewriter.getI64IntegerAttr(
@@ -945,17 +995,16 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                 /*fill_value=*/cstNegInf, /*dtype=*/cstFloatDtype,
                 /*layout=*/cstNone, /*device=*/cstNone, /*pin_memory=*/cstNone);
 
-            // mask_float = where(mask_bool, 0, -inf)
-            SmallVector<int64_t> maskFloatSizes{batchSize, kvSeqLen};
+            // mask_float = where(causalMask, 0, -inf)
+            SmallVector<int64_t> maskFloatSizes{batchSize, sequenceLength,
+                                                kvSeqLen};
             Torch::ValueTensorType maskFloatType = Torch::ValueTensorType::get(
                 context, maskFloatSizes, rewriter.getF32Type());
             Value maskFloat = Torch::AtenWhereSelfOp::create(
-                rewriter, loc, maskFloatType, maskBool, zeroTensor,
+                rewriter, loc, maskFloatType, causalMask, zeroTensor,
                 negInfTensor);
 
-            // Reshape mask to [batch, 1, seqLen, kvSeqLen] for SDPA
-            // The query sequence length dimension must match the actual query
-            // sequence length for tm_tensor.attention compatibility.
+            // Reshape to [batch, 1, seqLen, kvSeqLen] for SDPA
             Value maskReshapeSizeList = Torch::PrimListConstructOp::create(
                 rewriter, loc,
                 rewriter.getType<Torch::ListType>(
@@ -966,37 +1015,8 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                                                kvSeqLen};
             Torch::ValueTensorType attnMaskType = Torch::ValueTensorType::get(
                 context, attnMaskSizes, rewriter.getF32Type());
-
-            // Expand the [batch, kvSeqLen] mask to [batch, seqLen, kvSeqLen]
-            // by unsqueezing at dim 1 and then expanding
-            Value unsqueezeDim = Torch::ConstantIntOp::create(
-                rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
-            SmallVector<int64_t> maskUnsqueezeSizes{batchSize, 1, kvSeqLen};
-            Torch::ValueTensorType maskUnsqueezeType =
-                Torch::ValueTensorType::get(context, maskUnsqueezeSizes,
-                                            rewriter.getF32Type());
-            Value maskUnsqueezed = Torch::AtenUnsqueezeOp::create(
-                rewriter, loc, maskUnsqueezeType, maskFloat, unsqueezeDim);
-
-            // Expand [batch, 1, kvSeqLen] to [batch, seqLen, kvSeqLen]
-            Value expandSizeList = Torch::PrimListConstructOp::create(
-                rewriter, loc,
-                rewriter.getType<Torch::ListType>(
-                    rewriter.getType<Torch::IntType>()),
-                SmallVector<Value>{cstBatchSize, cstSequenceLength,
-                                   kvSeqLenVal});
-            SmallVector<int64_t> maskExpandedSizes{batchSize, sequenceLength,
-                                                   kvSeqLen};
-            Torch::ValueTensorType maskExpandedType =
-                Torch::ValueTensorType::get(context, maskExpandedSizes,
-                                            rewriter.getF32Type());
-            Value maskExpanded = Torch::AtenExpandOp::create(
-                rewriter, loc, maskExpandedType, maskUnsqueezed, expandSizeList,
-                /*implicit=*/cstFalse);
-
-            // Reshape to [batch, 1, seqLen, kvSeqLen] for SDPA
             attnMask = Torch::AtenReshapeOp::create(
-                rewriter, loc, attnMaskType, maskExpanded, maskReshapeSizeList);
+                rewriter, loc, attnMaskType, maskFloat, maskReshapeSizeList);
           }
         }
 

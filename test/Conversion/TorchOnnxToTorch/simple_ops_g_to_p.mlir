@@ -2571,8 +2571,8 @@ func.func @test_group_query_attention(%arg0: !torch.vtensor<[1,1,16],f32>, %arg1
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   // CHECK: torch.aten.arange {{.*}} -> !torch.vtensor<[1],si64>
-  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,1],i1>
-  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,1],f32>
+  // CHECK: torch.aten.le.Tensor {{.*}} -> !torch.vtensor<[1,1,1],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,1,1],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,1,1],f32>
   // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,16],f32>
@@ -2595,8 +2595,8 @@ func.func @test_group_query_attention_with_rotary_embedding(%query: !torch.vtens
   // CHECK: torch.onnx.rotary_embedding {{.*}} %arg3, %arg4, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,1],i1>
-  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,1],f32>
+  // CHECK: torch.aten.le.Tensor {{.*}} -> !torch.vtensor<[1,1,1],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,1,1],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,1,1],f32>
   // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,16],f32>
@@ -2705,8 +2705,8 @@ func.func @test_group_query_attention_kv_cache(%query: !torch.vtensor<[1,1,16],f
   // CHECK: torch.prim.ListConstruct %arg4, {{.*}} -> !torch.list<vtensor>
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,5,8],f32>
   // CHECK: torch.aten.arange {{.*}} -> !torch.vtensor<[5],si64>
-  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,5],i1>
-  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,5],f32>
+  // CHECK: torch.aten.le.Tensor {{.*}} -> !torch.vtensor<[1,1,5],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,1,5],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,1,5],f32>
   // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   %seqlens_k = torch.operator "onnx.Constant"() {torch.onnx.value = dense<4> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
@@ -2723,13 +2723,13 @@ func.func @test_group_query_attention_kv_cache(%query: !torch.vtensor<[1,1,16],f
 // past_key=3, current=4, total=7, seqlens_k=6 (=7-1), mask boundary=7
 // CHECK-LABEL: func.func @test_group_query_attention_seqlens_k_mask
 func.func @test_group_query_attention_seqlens_k_mask(%query: !torch.vtensor<[1,4,16],f32>, %key: !torch.vtensor<[1,4,16],f32>, %value: !torch.vtensor<[1,4,16],f32>, %past_key: !torch.vtensor<[1,2,3,8],f32>, %past_value: !torch.vtensor<[1,2,3,8],f32>) -> (!torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,7,8],f32>, !torch.vtensor<[1,2,7,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
-  // Verify mask boundary uses seqlens_k + 1, generating mask with KV seq length 7
+  // Verify causal mask with proper shape: [batch, seqLen, kvSeqLen]
+  // For seqLen=4, kvSeqLen=7, the causal mask allows q[i] to attend to k[j] where j <= seqlens_k + i
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,7,8],f32>
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,7,8],f32>
   // CHECK: torch.aten.arange {{.*}} -> !torch.vtensor<[7],si64>
-  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,7],i1>
-  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,7],f32>
-  // CHECK: torch.aten.expand {{.*}} -> !torch.vtensor<[1,4,7],f32>
+  // CHECK: torch.aten.le.Tensor {{.*}} -> !torch.vtensor<[1,4,7],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,4,7],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,4,7],f32>
   // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
   %seqlens_k = torch.operator "onnx.Constant"() {torch.onnx.value = dense<6> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
@@ -2740,7 +2740,7 @@ func.func @test_group_query_attention_seqlens_k_mask(%query: !torch.vtensor<[1,4
 
 // -----
 
-// Test GQA with multi-token prefill (seqLen=2) to verify mask shape [1,1,2,5]
+// Test GQA with multi-token prefill (seqLen=2) to verify causal mask shape [1,2,5]
 // CHECK-LABEL: func.func @test_group_query_attention_prefill_mask_shape
 func.func @test_group_query_attention_prefill_mask_shape(%query: !torch.vtensor<[1,2,16],f32>, %key: !torch.vtensor<[1,2,16],f32>, %value: !torch.vtensor<[1,2,16],f32>, %past_key: !torch.vtensor<[1,2,3,8],f32>, %past_value: !torch.vtensor<[1,2,3,8],f32>) -> (!torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
   // CHECK: torch.aten.reshape %arg0, {{.*}} -> !torch.vtensor<[1,2,2,8],f32>
@@ -2750,7 +2750,8 @@ func.func @test_group_query_attention_prefill_mask_shape(%query: !torch.vtensor<
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,5,8],f32>
   // CHECK: torch.prim.ListConstruct %arg4, {{.*}} -> !torch.list<vtensor>
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,5,8],f32>
-  // CHECK: torch.aten.expand {{.*}} -> !torch.vtensor<[1,2,5],f32>
+  // CHECK: torch.aten.le.Tensor {{.*}} -> !torch.vtensor<[1,2,5],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,2,5],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,2,5],f32>
   // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,2,8],f32>
   %seqlens_k = torch.operator "onnx.Constant"() {torch.onnx.value = dense<3> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
