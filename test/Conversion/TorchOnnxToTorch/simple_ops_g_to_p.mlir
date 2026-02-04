@@ -2771,12 +2771,12 @@ func.func @test_group_query_attention_position_ids(%query: !torch.vtensor<[1,4,1
   // CHECK: torch.aten.reshape %arg0, {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
   // CHECK: torch.aten.reshape %arg1, {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
   // CHECK: torch.aten.reshape %arg2, {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
-  // Verify position ID calculation: arange, add past_seqlens, where condition
+  // Verify position ID calculation: arange, repeat, add past_seqlens
+  // Position IDs should be [past_len, past_len+1, ..., past_len+seq-1]
+  // For this test: past_len=3, seq=4, so positions=[3,4,5,6]
   // CHECK: torch.aten.arange {{.*}} -> !torch.vtensor<[4],si64>
   // CHECK: torch.aten.repeat {{.*}} -> !torch.vtensor<[1,4],si64>
   // CHECK: torch.aten.add.Tensor {{.*}} -> !torch.vtensor<[1,4],si64>
-  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,4],i1>
-  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,4],si64>
   // Verify rotary embedding is applied with position IDs
   // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
   // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,4,8],f32>

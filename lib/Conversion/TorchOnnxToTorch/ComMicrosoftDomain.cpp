@@ -621,39 +621,20 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
 
         Value qRotary = qInput, kRotary = kInput;
         if (doRotary) {
-          // `totalSequenceLength` is a scalar tensor.
-          Value scalarTotalSeqLens = Torch::AtenItemOp::create(
-              rewriter, loc, rewriter.getType<Torch::IntType>(),
-              totalSequenceLength);
           Value cstIntOne = Torch::ConstantIntOp::create(
               rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
-          Type boolTy = rewriter.getType<Torch::BoolType>();
-          Value condA = Torch::AtenGtIntOp::create(
-              rewriter, loc, boolTy, cstSequenceLength, cstIntOne);
-          Value condB = Torch::AtenNeIntOp::create(
-              rewriter, loc, boolTy, cstSequenceLength, scalarTotalSeqLens);
-          //   if (sequence_length > 1 && sequence_length !=
-          //   total_sequence_length)
-          //         is_subsequent_prompt = false;  // Subsequent prompt
-          Value isSubsequentPrompt = Torch::Aten__And__BoolOp::create(
-              rewriter, loc, boolTy, condA, condB);
 
-          // Generating position_ids for rotary_embedding as follows:
-          //   pos_ids_a = torch.zeros((batch_size, seq_len), dtype=torch.int64)
-          //
+          // Generating position_ids for rotary_embedding:
           //   total_seqlens = seqlens_k + 1
           //   past_seqlens = total_seqlens - sequence_length
-          //   pos_ids = torch.arange(sequence_length,
-          //             dtype=torch.int64).repeat(batch_size, 1)
+          //   pos_ids = torch.arange(sequence_length).repeat(batch_size, 1)
           //   pos_ids = pos_ids + past_seqlens.view(-1, 1)
-          //   cond = pos_ids < total_seqlens.view(-1, 1)
-          //   one_tensor = torch.tensor(1, dtype=torch.int64)
-          //   pos_ids_b = torch.where(cond, pos_ids, one_tensor)
           //
-          //  if subsequent_prompt:
-          //      pos_ids = pos_ids_b
-          //  else:
-          //      pos_ids = pos_ids_a
+          // This works for all cases:
+          // - Pure prefill: past_seqlens = 0, positions = [0, 1, ..., seq-1]
+          // - Single decode: past_seqlens = past_len, positions = [past_len]
+          // - Multi-token with past: positions = [past_len, ...,
+          // past_len+seq-1]
           SmallVector<int64_t> positionIdsSizeInt{batchSize, sequenceLength};
           Torch::ValueTensorType positionIdsType = Torch::ValueTensorType::get(
               context, positionIdsSizeInt,
@@ -672,19 +653,6 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
               rewriter, binder.getLoc(), rewriter.getType<Torch::FloatType>(),
               rewriter.getF64FloatAttr(1.0));
 
-          Value positionIdsA, positionIdsB;
-
-          Value posIdsSizeList = Torch::PrimListConstructOp::create(
-              rewriter, loc,
-              rewriter.getType<Torch::ListType>(
-                  rewriter.getType<Torch::IntType>()),
-              SmallVector<Value>{cstBatchSize, cstSequenceLength});
-          positionIdsA = Torch::AtenZerosOp::create(
-              rewriter, loc, positionIdsType, /*size=*/posIdsSizeList,
-              /*dtype=*/cstInt64Dtype,
-              /*layout=*/cstNone, /*device=*/cstNone,
-              /*pin_memory=*/cstNone);
-
           // Convert seqlens_k which is a tensor of type si32 to si64.
           Torch::ValueTensorType seqLensKType =
               cast<Torch::ValueTensorType>(seqlensK.getType());
@@ -695,13 +663,21 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                   rewriter.getIntegerType(/*width=*/64, /*isSigned=*/true)),
               seqlensK, cstInt64Dtype, /*non_blocking=*/cstFalse,
               /*copy=*/cstFalse, /*memory_format=*/cstNone);
+
+          // total_seqlens = seqlens_k + 1 (per ONNX spec, seqlens_k = total -
+          // 1)
           Value totalSeqLens = Torch::AtenAddScalarOp::create(
               rewriter, loc, seqlensK.getType(), /*self=*/seqlensK,
               /*other=*/cstIntOne,
               /*alpha=*/cstIntOne);
+
+          // past_seqlens = total_seqlens - sequence_length
           Value pastSeqLens = Torch::AtenSubScalarOp::create(
               rewriter, loc, totalSeqLens.getType(), /*self=*/totalSeqLens,
               /*other=*/cstSequenceLength, /*alpha=*/cstIntOne);
+
+          // Create position IDs: arange(seq_len).repeat(batch, 1) +
+          // past_seqlens
           Torch::ValueTensorType initPosIdsType = Torch::ValueTensorType::get(
               context, {sequenceLength},
               IntegerType::get(context, 64, IntegerType::Signed));
@@ -713,68 +689,27 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
               rewriter, binder.getLoc(),
               Torch::ListType::get(Torch::IntType::get(context)),
               llvm::SmallVector<Value>{cstBatchSize, cstIntOne});
-          positionIdsB = Torch::AtenRepeatOp::create(
+          Value positionIds = Torch::AtenRepeatOp::create(
               rewriter, loc, positionIdsType, initPosIds,
               /*repeats=*/repeatValuesList);
 
+          // Reshape past_seqlens to [batch, 1] for broadcasting
           Value cstIntMinusOne = Torch::ConstantIntOp::create(
               rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(-1));
           Value viewSizeList = Torch::PrimListConstructOp::create(
               rewriter, binder.getLoc(),
               Torch::ListType::get(Torch::IntType::get(context)),
               llvm::SmallVector<Value>{cstIntMinusOne, cstIntOne});
-
           Torch::ValueTensorType seqLensViewType = Torch::ValueTensorType::get(
               context, llvm::SmallVector<int64_t>{batchSize, 1},
               IntegerType::get(context, 64, IntegerType::Signed));
           pastSeqLens = Torch::AtenViewOp::create(
               rewriter, loc, seqLensViewType, pastSeqLens, viewSizeList);
 
-          positionIdsB = Torch::AtenAddTensorOp::create(
-              rewriter, loc, positionIdsType, positionIdsB, pastSeqLens,
+          // Add past_seqlens to get final position IDs
+          positionIds = Torch::AtenAddTensorOp::create(
+              rewriter, loc, positionIdsType, positionIds, pastSeqLens,
               /*alpha=*/cstIntOne);
-
-          totalSeqLens = Torch::AtenViewOp::create(
-              rewriter, loc, seqLensViewType, totalSeqLens, viewSizeList);
-          Value cond = Torch::AtenLtTensorOp::create(
-              rewriter, loc,
-              positionIdsType.getWithSizesAndDtype(positionIdsType.getSizes(),
-                                                   rewriter.getI1Type()),
-              positionIdsB, totalSeqLens);
-
-          Value cstOneTensorDataList = Torch::PrimListConstructOp::create(
-              rewriter, loc,
-              rewriter.getType<Torch::ListType>(
-                  rewriter.getType<Torch::IntType>()),
-              SmallVector<Value>{cstIntOne});
-          Value cstOneTensor = Torch::AtenTensorOp::create(
-              rewriter, loc,
-              Torch::ValueTensorType::get(
-                  context, {},
-                  IntegerType::get(context, 64, IntegerType::Signed)),
-              cstOneTensorDataList, /*dtype=*/cstInt64Dtype,
-              /*layout=*/cstNone, /*requires_grad=*/cstFalse);
-
-          positionIdsB = Torch::AtenWhereSelfOp::create(
-              rewriter, loc, positionIdsType, cond, positionIdsB, cstOneTensor);
-
-          isSubsequentPrompt = Torch::AtenIntBoolOp::create(
-              rewriter, loc, rewriter.getType<Torch::IntType>(),
-              isSubsequentPrompt);
-          isSubsequentPrompt = Torch::AtenFullOp::create(
-              rewriter, loc,
-              Torch::ValueTensorType::get(context, positionIdsSizeInt,
-                                          rewriter.getI1Type()),
-              /*size=*/posIdsSizeList, /*fill_value=*/isSubsequentPrompt,
-              /*dtype=*/
-              Torch::ConstantIntOp::create(
-                  rewriter, binder.getLoc(),
-                  rewriter.getI64IntegerAttr(
-                      (int)torch_upstream::ScalarType::Bool)),
-              /*layout=*/cstNone, /*device=*/cstNone, /*pin_memory=*/cstNone);
-          Value positionIds = Torch::AtenWhereSelfOp::create(
-              rewriter, loc, positionIdsType, isSubsequentPrompt, positionIdsB,
-              positionIdsA);
 
           // Performing RotaryEmbedding over Query and Key.
           qRotary = Torch::OnnxVariantRotaryEmbeddingOp::create(
