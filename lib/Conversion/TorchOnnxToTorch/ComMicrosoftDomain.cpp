@@ -776,41 +776,18 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
               /*scale=*/cstFloatOne);
         }
 
-        // Do attention.
-        Value cstEnableGQA = Torch::ConstantBoolOp::create(rewriter, loc, true);
-        Value cstFloatZero = Torch::ConstantFloatOp::create(
-            rewriter, binder.getLoc(), rewriter.getType<Torch::FloatType>(),
-            rewriter.getF64FloatAttr(0.0));
-        Value cstScale = cstNone;
-        if (scale != 0.0f)
-          cstScale = Torch::ConstantFloatOp::create(
-              rewriter, binder.getLoc(), rewriter.getType<Torch::FloatType>(),
-              rewriter.getF64FloatAttr(scale));
-        Value attention = Torch::AtenScaledDotProductAttentionOp::create(
-            rewriter, loc, qRotary.getType(), qRotary, kRotary, vInput,
-            /*attn_mask=*/cstNone,
-            /*dropout_p=*/cstFloatZero, /*is_causal=*/cstFalse, cstScale,
-            cstEnableGQA);
-        // Reshaping the attention result from:
-        //    (batch_size, num_heads, sequence_length, head_size)
-        // -> (batch_size, sequence_length, hidden_size)
-        Value attentionResultSizesList = Torch::PrimListConstructOp::create(
-            rewriter, binder.getLoc(),
-            Torch::ListType::get(Torch::IntType::get(attention.getContext())),
-            llvm::SmallVector<Value>{cstBatchSize, cstSequenceLength,
-                                     cstHiddenSize});
-        attention = Torch::AtenReshapeOp::create(
-            rewriter, loc, resultTypes[0], attention, attentionResultSizesList);
-
-        // Compute 2nd and 3rd result: present_key, present_value.
-        // present_key = torch.cat([past_key, key], dim=2) or past_key
-        // present_value = torch.cat([past_value, value], dim=2) or past_value
+        // Compute present_key and present_value by concatenating past with
+        // current. These are used both for attention AND as output for the next
+        // iteration's KV cache.
+        // present_key = torch.cat([past_key, key], dim=2)
+        // present_value = torch.cat([past_value, value], dim=2)
         Value presentKey = pastKey, presentValue = pastValue;
+        Value cstConcatDim = Torch::ConstantIntOp::create(
+            rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(2));
+
         if (!llvm::equal(
                 cast<Torch::ValueTensorType>(pastKey.getType()).getSizes(),
                 cast<Torch::ValueTensorType>(resultTypes[1]).getSizes())) {
-          Value cstConcatDim = Torch::ConstantIntOp::create(
-              rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(2));
           Type kvListElemType = keyType.getWithSizesAndDtype(
               /*optionalSizes=*/std::nullopt,
               /*optionalDtype=*/nullptr);
@@ -824,8 +801,6 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         if (!llvm::equal(
                 cast<Torch::ValueTensorType>(pastValue.getType()).getSizes(),
                 cast<Torch::ValueTensorType>(resultTypes[2]).getSizes())) {
-          Value cstConcatDim = Torch::ConstantIntOp::create(
-              rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(2));
           Type kvListElemType = keyType.getWithSizesAndDtype(
               /*optionalSizes=*/std::nullopt,
               /*optionalDtype=*/nullptr);
@@ -835,6 +810,218 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
           presentValue = Torch::AtenCatOp::create(rewriter, loc, resultTypes[2],
                                                   valueList, cstConcatDim);
         }
+
+        // Generate attention mask from seqlens_k to mask out invalid KV
+        // positions. The mask prevents attending to positions beyond the valid
+        // sequence length (seqlens_k + seq_q) for each batch element.
+        // Mask shape: [batch, 1, 1, total_kv_seq] where invalid positions are
+        // -inf.
+        Value attnMask = cstNone;
+
+        // Get the KV sequence length from presentKey shape
+        Torch::ValueTensorType presentKeyType =
+            cast<Torch::ValueTensorType>(presentKey.getType());
+        if (presentKeyType.hasSizes() &&
+            presentKeyType.getSizes().size() == 4) {
+          int64_t kvSeqLen = presentKeyType.getSizes()[2];
+
+          // Only generate mask if KV sequence length is dynamic or > 0
+          // For dynamic shapes or non-trivial sequences, we need to mask
+          if (kvSeqLen == Torch::kUnknownSize || kvSeqLen > 0) {
+            // Get the total valid sequence length: seqlens_k + seq_q
+            // For single token generation, this is seqlens_k + 1
+            // seqlens_k is already converted to i64 dtype in rotary section,
+            // but we need to handle non-rotary case too
+            Value seqlensKInt64 = seqlensK;
+            Torch::ValueTensorType seqLensKType =
+                cast<Torch::ValueTensorType>(seqlensK.getType());
+            if (seqLensKType.getOptionalDtype() &&
+                seqLensKType.getOptionalDtype().isInteger(32)) {
+              Value cstInt64Dtype = Torch::ConstantIntOp::create(
+                  rewriter, binder.getLoc(),
+                  rewriter.getI64IntegerAttr(
+                      (int)torch_upstream::ScalarType::Long));
+              seqlensKInt64 = Torch::AtenToDtypeOp::create(
+                  rewriter, loc,
+                  seqLensKType.getWithSizesAndDtype(
+                      std::nullopt,
+                      rewriter.getIntegerType(/*width=*/64, /*isSigned=*/true)),
+                  seqlensK, cstInt64Dtype, /*non_blocking=*/cstFalse,
+                  /*copy=*/cstFalse, /*memory_format=*/cstNone);
+            }
+
+            // total_valid_len = seqlens_k + seq_q (per batch element)
+            Value cstIntOne = Torch::ConstantIntOp::create(
+                rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
+            Value totalValidLen = Torch::AtenAddScalarOp::create(
+                rewriter, loc, seqlensKInt64.getType(), seqlensKInt64,
+                cstSequenceLength, cstIntOne);
+
+            // Get KV sequence dimension size
+            Value cstDim2 = Torch::ConstantIntOp::create(
+                rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(2));
+            Value kvSeqLenVal = Torch::AtenSizeIntOp::create(
+                rewriter, loc, rewriter.getType<Torch::IntType>(), presentKey,
+                cstDim2);
+
+            // Create range tensor [0, 1, 2, ..., kvSeqLen-1]
+            Value cstInt64Dtype = Torch::ConstantIntOp::create(
+                rewriter, binder.getLoc(),
+                rewriter.getI64IntegerAttr(
+                    (int)torch_upstream::ScalarType::Long));
+            Torch::ValueTensorType rangeType = Torch::ValueTensorType::get(
+                context, {kvSeqLen},
+                rewriter.getIntegerType(64, /*isSigned=*/true));
+            Value posRange = Torch::AtenArangeOp::create(
+                rewriter, loc, rangeType, kvSeqLenVal, cstInt64Dtype,
+                /*layout=*/cstNone, /*device=*/cstNone, /*pin_memory=*/cstNone);
+
+            // Reshape totalValidLen to [batch, 1] for broadcasting
+            Value cstMinusOne = Torch::ConstantIntOp::create(
+                rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(-1));
+            Value viewSizeList = Torch::PrimListConstructOp::create(
+                rewriter, loc,
+                rewriter.getType<Torch::ListType>(
+                    rewriter.getType<Torch::IntType>()),
+                SmallVector<Value>{cstMinusOne, cstIntOne});
+            SmallVector<int64_t> validLenViewSizes{batchSize, 1};
+            Torch::ValueTensorType validLenViewType =
+                Torch::ValueTensorType::get(
+                    context, validLenViewSizes,
+                    rewriter.getIntegerType(64, /*isSigned=*/true));
+            Value totalValidLenView = Torch::AtenViewOp::create(
+                rewriter, loc, validLenViewType, totalValidLen, viewSizeList);
+
+            // Compare: mask_bool[b, k] = (k < totalValidLen[b])
+            // Result shape: [batch, kvSeqLen]
+            SmallVector<int64_t> maskBoolSizes{batchSize, kvSeqLen};
+            Torch::ValueTensorType maskBoolType = Torch::ValueTensorType::get(
+                context, maskBoolSizes, rewriter.getI1Type());
+            Value maskBool = Torch::AtenLtTensorOp::create(
+                rewriter, loc, maskBoolType, posRange, totalValidLenView);
+
+            // Convert bool mask to float mask: True -> 0, False -> -inf
+            // where_self(mask, 0, -inf)
+            Value cstZeroFloat = Torch::ConstantFloatOp::create(
+                rewriter, binder.getLoc(), rewriter.getType<Torch::FloatType>(),
+                rewriter.getF64FloatAttr(0.0));
+            Value cstNegInf = Torch::ConstantFloatOp::create(
+                rewriter, binder.getLoc(), rewriter.getType<Torch::FloatType>(),
+                rewriter.getF64FloatAttr(
+                    -std::numeric_limits<double>::infinity()));
+
+            // Create scalar tensors for where operation
+            Value cstFloatDtype = Torch::ConstantIntOp::create(
+                rewriter, binder.getLoc(),
+                rewriter.getI64IntegerAttr(
+                    (int)torch_upstream::ScalarType::Float));
+            Torch::ValueTensorType scalarTensorType =
+                Torch::ValueTensorType::get(context, {}, rewriter.getF32Type());
+            Value zeroTensor = Torch::AtenFullOp::create(
+                rewriter, loc, scalarTensorType,
+                /*size=*/
+                Torch::PrimListConstructOp::create(
+                    rewriter, loc,
+                    rewriter.getType<Torch::ListType>(
+                        rewriter.getType<Torch::IntType>()),
+                    SmallVector<Value>{}),
+                /*fill_value=*/cstZeroFloat, /*dtype=*/cstFloatDtype,
+                /*layout=*/cstNone, /*device=*/cstNone, /*pin_memory=*/cstNone);
+            Value negInfTensor = Torch::AtenFullOp::create(
+                rewriter, loc, scalarTensorType,
+                /*size=*/
+                Torch::PrimListConstructOp::create(
+                    rewriter, loc,
+                    rewriter.getType<Torch::ListType>(
+                        rewriter.getType<Torch::IntType>()),
+                    SmallVector<Value>{}),
+                /*fill_value=*/cstNegInf, /*dtype=*/cstFloatDtype,
+                /*layout=*/cstNone, /*device=*/cstNone, /*pin_memory=*/cstNone);
+
+            // mask_float = where(mask_bool, 0, -inf)
+            SmallVector<int64_t> maskFloatSizes{batchSize, kvSeqLen};
+            Torch::ValueTensorType maskFloatType = Torch::ValueTensorType::get(
+                context, maskFloatSizes, rewriter.getF32Type());
+            Value maskFloat = Torch::AtenWhereSelfOp::create(
+                rewriter, loc, maskFloatType, maskBool, zeroTensor,
+                negInfTensor);
+
+            // Reshape mask to [batch, 1, seqLen, kvSeqLen] for SDPA
+            // The query sequence length dimension must match the actual query
+            // sequence length for tm_tensor.attention compatibility.
+            Value maskReshapeSizeList = Torch::PrimListConstructOp::create(
+                rewriter, loc,
+                rewriter.getType<Torch::ListType>(
+                    rewriter.getType<Torch::IntType>()),
+                SmallVector<Value>{cstBatchSize, cstIntOne, cstSequenceLength,
+                                   kvSeqLenVal});
+            SmallVector<int64_t> attnMaskSizes{batchSize, 1, sequenceLength,
+                                               kvSeqLen};
+            Torch::ValueTensorType attnMaskType = Torch::ValueTensorType::get(
+                context, attnMaskSizes, rewriter.getF32Type());
+
+            // Expand the [batch, kvSeqLen] mask to [batch, seqLen, kvSeqLen]
+            // by unsqueezing at dim 1 and then expanding
+            Value unsqueezeDim = Torch::ConstantIntOp::create(
+                rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
+            SmallVector<int64_t> maskUnsqueezeSizes{batchSize, 1, kvSeqLen};
+            Torch::ValueTensorType maskUnsqueezeType =
+                Torch::ValueTensorType::get(context, maskUnsqueezeSizes,
+                                            rewriter.getF32Type());
+            Value maskUnsqueezed = Torch::AtenUnsqueezeOp::create(
+                rewriter, loc, maskUnsqueezeType, maskFloat, unsqueezeDim);
+
+            // Expand [batch, 1, kvSeqLen] to [batch, seqLen, kvSeqLen]
+            Value expandSizeList = Torch::PrimListConstructOp::create(
+                rewriter, loc,
+                rewriter.getType<Torch::ListType>(
+                    rewriter.getType<Torch::IntType>()),
+                SmallVector<Value>{cstBatchSize, cstSequenceLength,
+                                   kvSeqLenVal});
+            SmallVector<int64_t> maskExpandedSizes{batchSize, sequenceLength,
+                                                   kvSeqLen};
+            Torch::ValueTensorType maskExpandedType =
+                Torch::ValueTensorType::get(context, maskExpandedSizes,
+                                            rewriter.getF32Type());
+            Value maskExpanded = Torch::AtenExpandOp::create(
+                rewriter, loc, maskExpandedType, maskUnsqueezed, expandSizeList,
+                /*implicit=*/cstFalse);
+
+            // Reshape to [batch, 1, seqLen, kvSeqLen] for SDPA
+            attnMask = Torch::AtenReshapeOp::create(
+                rewriter, loc, attnMaskType, maskExpanded, maskReshapeSizeList);
+          }
+        }
+
+        // Do attention with full KV cache (past + current) and mask.
+        Value cstEnableGQA = Torch::ConstantBoolOp::create(rewriter, loc, true);
+        Value cstFloatZero = Torch::ConstantFloatOp::create(
+            rewriter, binder.getLoc(), rewriter.getType<Torch::FloatType>(),
+            rewriter.getF64FloatAttr(0.0));
+        Value cstScale = cstNone;
+        if (scale != 0.0f)
+          cstScale = Torch::ConstantFloatOp::create(
+              rewriter, binder.getLoc(), rewriter.getType<Torch::FloatType>(),
+              rewriter.getF64FloatAttr(scale));
+
+        // Use presentKey/presentValue (full KV cache) for attention, not just
+        // the current token's K/V. This is essential for proper KV caching.
+        Value attention = Torch::AtenScaledDotProductAttentionOp::create(
+            rewriter, loc, qRotary.getType(), qRotary, presentKey, presentValue,
+            /*attn_mask=*/attnMask,
+            /*dropout_p=*/cstFloatZero, /*is_causal=*/cstFalse, cstScale,
+            cstEnableGQA);
+
+        // Reshaping the attention result from:
+        //    (batch_size, num_heads, sequence_length, head_size)
+        // -> (batch_size, sequence_length, hidden_size)
+        Value attentionResultSizesList = Torch::PrimListConstructOp::create(
+            rewriter, binder.getLoc(),
+            Torch::ListType::get(Torch::IntType::get(attention.getContext())),
+            llvm::SmallVector<Value>{cstBatchSize, cstSequenceLength,
+                                     cstHiddenSize});
+        attention = Torch::AtenReshapeOp::create(
+            rewriter, loc, resultTypes[0], attention, attentionResultSizesList);
 
         rewriter.replaceOp(binder.op, {attention, presentKey, presentValue});
         return success();
