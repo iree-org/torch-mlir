@@ -829,7 +829,18 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
             Value cstMinusOne = Torch::ConstantIntOp::create(
                 rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(-1));
 
-            // seqlensK -> [batch, 1, 1]
+            // Compute past_len = seqlens_k + 1 - sequence_length
+            // This is the number of tokens in the past KV cache.
+            // For prefill: past_len = 0
+            // For decode: past_len = number of past tokens
+            Value totalSeqLenMask = Torch::AtenAddScalarOp::create(
+                rewriter, loc, seqlensKInt64.getType(), seqlensKInt64,
+                cstIntOne, cstIntOne);
+            Value pastLen = Torch::AtenSubScalarOp::create(
+                rewriter, loc, totalSeqLenMask.getType(), totalSeqLenMask,
+                cstSequenceLength, cstIntOne);
+
+            // pastLen -> [batch, 1, 1]
             Value seqlensViewList = Torch::PrimListConstructOp::create(
                 rewriter, loc,
                 rewriter.getType<Torch::ListType>(
@@ -840,8 +851,8 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                 Torch::ValueTensorType::get(
                     context, seqlensViewSizes,
                     rewriter.getIntegerType(64, /*isSigned=*/true));
-            Value seqlensKView = Torch::AtenViewOp::create(
-                rewriter, loc, seqlensViewType, seqlensKInt64, seqlensViewList);
+            Value pastLenView = Torch::AtenViewOp::create(
+                rewriter, loc, seqlensViewType, pastLen, seqlensViewList);
 
             // qRange -> [1, seqLen, 1]
             Value qViewList = Torch::PrimListConstructOp::create(
@@ -869,30 +880,30 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
             Value kRangeView = Torch::AtenViewOp::create(
                 rewriter, loc, kViewType, kRange, kViewList);
 
-            // Compute causal mask: k <= seqlens_k + q
-            // Equivalently: k - seqlens_k <= q, or k <= seqlens_k + q
-            // This allows query at position q to attend to KV positions 0..
-            // (seqlens_k + q), which gives proper causal behavior considering
-            // the past KV cache.
+            // Compute causal mask: k <= past_len + q
+            // For query at position q (0-indexed within current sequence),
+            // allow attending to KV positions 0..(past_len + q).
+            // - Prefill (past_len=0): q=0 attends to [0], q=1 to [0,1], etc.
+            // - Decode (past_len=N): q=0 attends to [0..N]
             //
-            // seqlens_k + q: [batch, 1, 1] + [1, seqLen, 1] -> [batch, seqLen,
+            // past_len + q: [batch, 1, 1] + [1, seqLen, 1] -> [batch, seqLen,
             // 1]
-            SmallVector<int64_t> seqlensQSizes{batchSize, sequenceLength, 1};
-            Torch::ValueTensorType seqlensQType = Torch::ValueTensorType::get(
-                context, seqlensQSizes,
+            SmallVector<int64_t> pastLenQSizes{batchSize, sequenceLength, 1};
+            Torch::ValueTensorType pastLenQType = Torch::ValueTensorType::get(
+                context, pastLenQSizes,
                 rewriter.getIntegerType(64, /*isSigned=*/true));
-            Value seqlensKPlusQ = Torch::AtenAddTensorOp::create(
-                rewriter, loc, seqlensQType, seqlensKView, qRangeView,
+            Value pastLenPlusQ = Torch::AtenAddTensorOp::create(
+                rewriter, loc, pastLenQType, pastLenView, qRangeView,
                 cstIntOne);
 
-            // k <= seqlens_k + q: [1, 1, kvSeqLen] <= [batch, seqLen, 1]
+            // k <= past_len + q: [1, 1, kvSeqLen] <= [batch, seqLen, 1]
             // -> [batch, seqLen, kvSeqLen]
             SmallVector<int64_t> maskBoolSizes{batchSize, sequenceLength,
                                                kvSeqLen};
             Torch::ValueTensorType maskBoolType = Torch::ValueTensorType::get(
                 context, maskBoolSizes, rewriter.getI1Type());
             Value causalMask = Torch::AtenLeTensorOp::create(
-                rewriter, loc, maskBoolType, kRangeView, seqlensKPlusQ);
+                rewriter, loc, maskBoolType, kRangeView, pastLenPlusQ);
 
             // Convert bool mask to float mask: True -> 0, False -> -inf
             Value cstZeroFloat = Torch::ConstantFloatOp::create(
