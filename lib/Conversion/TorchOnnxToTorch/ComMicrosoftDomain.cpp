@@ -374,11 +374,11 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
               binder.op,
               "num_heads is a required attribute and should be non-zero");
 
-        if (smoothSoftmax != 0)
+        if (smoothSoftmax > 0)
           return rewriter.notifyMatchFailure(
               binder.op,
               "Unimplemented: smooth_softmax attribute is not supported, hence "
-              "it should have default value equal to 0");
+              "it should have a value <= 0 (disabled)");
 
         if (softcap != 0.0f)
           return rewriter.notifyMatchFailure(
@@ -410,15 +410,19 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
           //       v_hidden = kv_num_heads * head_size
           Torch::ValueTensorType packedType =
               cast<Torch::ValueTensorType>(packedQKV.getType());
-          if (!(packedType.hasSizes() && packedType.areAllSizesKnown()))
+          if (!packedType.hasSizes() || packedType.getSizes().size() != 3)
             return rewriter.notifyMatchFailure(
-                binder.op,
-                "Expected packed QKV input to have statically known sizes");
+                binder.op, "Expected packed QKV input to have 3 dimensions");
 
           SmallVector<int64_t> packedDims{packedType.getSizes()};
-          int64_t batchSize = packedDims[0];
-          int64_t sequenceLength = packedDims[1];
-          int64_t packedHiddenSize = packedDims[2];
+          int64_t batchSize = packedDims[0];        // may be dynamic
+          int64_t sequenceLength = packedDims[1];   // may be dynamic
+          int64_t packedHiddenSize = packedDims[2]; // must be static
+
+          if (packedHiddenSize == Torch::kUnknownSize)
+            return rewriter.notifyMatchFailure(
+                binder.op,
+                "Expected packed QKV hidden dimension (dim 2) to be static");
 
           // Calculate head_size from past_key shape: [batch, kv_num_heads,
           // past_seq, head_size]
@@ -429,6 +433,10 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                 binder.op, "Expected past_key to have 4 dimensions");
 
           int64_t headSize = pastKeyType.getSizes()[3];
+          if (headSize == Torch::kUnknownSize)
+            return rewriter.notifyMatchFailure(
+                binder.op, "Expected past_key head_size (dim 3) to be static");
+
           int64_t qHiddenSize = numHeads * headSize;
           int64_t kvHiddenSize = kvNumHeads * headSize;
 
@@ -454,6 +462,7 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
               rewriter, loc, rewriter.getI64IntegerAttr(packedHiddenSize));
 
           // Slice Q: packed_qkv[:, :, 0:q_hidden]
+          // batch and seq dimensions may be dynamic
           SmallVector<int64_t> querySizes{batchSize, sequenceLength,
                                           qHiddenSize};
           Torch::ValueTensorType queryType = Torch::ValueTensorType::get(
@@ -499,22 +508,44 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
 
         Torch::ValueTensorType queryType =
             cast<Torch::ValueTensorType>(query.getType());
-        if (!(queryType.hasSizes() && queryType.areAllSizesKnown()))
+        if (!queryType.hasSizes() || queryType.getSizes().size() != 3)
           return rewriter.notifyMatchFailure(
-              binder.op,
-              "Expected `query` input to have statically known sizes");
+              binder.op, "Expected `query` input to have 3 dimensions");
 
         SmallVector<int64_t> queryDims{queryType.getSizes()};
-        int64_t batchSize = queryDims[0];
-        int64_t sequenceLength = queryDims[1];
-        int64_t hiddenSize = queryDims[2];
+        int64_t batchSize = queryDims[0];      // may be dynamic
+        int64_t sequenceLength = queryDims[1]; // may be dynamic
+        int64_t hiddenSize = queryDims[2];     // must be static
+        if (hiddenSize == Torch::kUnknownSize)
+          return rewriter.notifyMatchFailure(
+              binder.op,
+              "Expected `query` hidden dimension (dim 2) to be static");
         int64_t headSize = hiddenSize / numHeads;
 
-        Value cstBatchSize = Torch::ConstantIntOp::create(
-            rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(batchSize));
-        Value cstSequenceLength = Torch::ConstantIntOp::create(
-            rewriter, binder.getLoc(),
-            rewriter.getI64IntegerAttr(sequenceLength));
+        // For dynamic dimensions, use aten.size.int to get runtime values
+        Type intType = rewriter.getType<Torch::IntType>();
+
+        Value cstBatchSize, cstSequenceLength;
+        if (batchSize == Torch::kUnknownSize) {
+          Value cstZeroDim = Torch::ConstantIntOp::create(
+              rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(0));
+          cstBatchSize = Torch::AtenSizeIntOp::create(rewriter, loc, intType,
+                                                      query, cstZeroDim);
+        } else {
+          cstBatchSize = Torch::ConstantIntOp::create(
+              rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(batchSize));
+        }
+        if (sequenceLength == Torch::kUnknownSize) {
+          Value cstOneDim = Torch::ConstantIntOp::create(
+              rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
+          cstSequenceLength = Torch::AtenSizeIntOp::create(
+              rewriter, loc, intType, query, cstOneDim);
+        } else {
+          cstSequenceLength = Torch::ConstantIntOp::create(
+              rewriter, binder.getLoc(),
+              rewriter.getI64IntegerAttr(sequenceLength));
+        }
+
         Value cstHiddenSize = Torch::ConstantIntOp::create(
             rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(hiddenSize));
         Value cstHeadSize = Torch::ConstantIntOp::create(
@@ -739,7 +770,7 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
               /*scale=*/cstFloatOne);
 
           kRotary = Torch::OnnxVariantRotaryEmbeddingOp::create(
-              rewriter, loc, qInput.getType(), kInput, positionIds, cosCache,
+              rewriter, loc, kInput.getType(), kInput, positionIds, cosCache,
               sinCache, cstInterleaved, /*is_packed_batching=*/cstIntZero,
               /*num_heads=*/cstIntZero, /*rotary_embedding_dim=*/cstIntZero,
               /*scale=*/cstFloatOne);
