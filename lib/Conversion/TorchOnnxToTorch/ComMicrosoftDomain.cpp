@@ -781,35 +781,25 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         // iteration's KV cache.
         // present_key = torch.cat([past_key, key], dim=2)
         // present_value = torch.cat([past_value, value], dim=2)
-        Value presentKey = pastKey, presentValue = pastValue;
+        // Always concatenate, even if past_key/past_value are empty (sequence
+        // length 0), as concatenating empty tensors still produces correct
+        // results.
         Value cstConcatDim = Torch::ConstantIntOp::create(
             rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(2));
 
-        if (!llvm::equal(
-                cast<Torch::ValueTensorType>(pastKey.getType()).getSizes(),
-                cast<Torch::ValueTensorType>(resultTypes[1]).getSizes())) {
-          Type kvListElemType = keyType.getWithSizesAndDtype(
-              /*optionalSizes=*/std::nullopt,
-              /*optionalDtype=*/nullptr);
-          Type kvListType = Torch::ListType::get(kvListElemType);
-          Value keyList = Torch::PrimListConstructOp::create(
-              rewriter, loc, kvListType, SmallVector<Value>{pastKey, kRotary});
-          presentKey = Torch::AtenCatOp::create(rewriter, loc, resultTypes[1],
-                                                keyList, cstConcatDim);
-        }
+        Type kvListElemType = keyType.getWithSizesAndDtype(
+            /*optionalSizes=*/std::nullopt,
+            /*optionalDtype=*/nullptr);
+        Type kvListType = Torch::ListType::get(kvListElemType);
+        Value keyList = Torch::PrimListConstructOp::create(
+            rewriter, loc, kvListType, SmallVector<Value>{pastKey, kRotary});
+        Value presentKey = Torch::AtenCatOp::create(
+            rewriter, loc, resultTypes[1], keyList, cstConcatDim);
 
-        if (!llvm::equal(
-                cast<Torch::ValueTensorType>(pastValue.getType()).getSizes(),
-                cast<Torch::ValueTensorType>(resultTypes[2]).getSizes())) {
-          Type kvListElemType = keyType.getWithSizesAndDtype(
-              /*optionalSizes=*/std::nullopt,
-              /*optionalDtype=*/nullptr);
-          Type kvListType = Torch::ListType::get(kvListElemType);
-          Value valueList = Torch::PrimListConstructOp::create(
-              rewriter, loc, kvListType, SmallVector<Value>{pastValue, vInput});
-          presentValue = Torch::AtenCatOp::create(rewriter, loc, resultTypes[2],
-                                                  valueList, cstConcatDim);
-        }
+        Value valueList = Torch::PrimListConstructOp::create(
+            rewriter, loc, kvListType, SmallVector<Value>{pastValue, vInput});
+        Value presentValue = Torch::AtenCatOp::create(
+            rewriter, loc, resultTypes[2], valueList, cstConcatDim);
 
         // Generate attention mask from seqlens_k to mask out invalid KV
         // positions. The mask prevents attending to positions beyond the valid

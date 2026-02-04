@@ -2538,19 +2538,18 @@ func.func @test_mwm(%arg0: !torch.vtensor<[],si64>, %arg1: !torch.vtensor<[],si6
 
 // -----
 
-// CHECK-LABEL:   func.func @test_group_query_attention(
+// CHECK-LABEL: func.func @test_group_query_attention
 func.func @test_group_query_attention(%arg0: !torch.vtensor<[1,1,16],f32>, %arg1: !torch.vtensor<[1,1,16],f32>, %arg2: !torch.vtensor<[1,1,16],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
-  // Verify query is reshaped to [batch, num_heads, seq, head_size]
-  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // Verify key is reshaped
-  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // Verify value is reshaped
-  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // Verify attention mask is generated (where operation for 0/-inf mask)
-  // CHECK: torch.aten.where.self
-  // Verify SDPA is called with mask (4th argument is a tensor, not none)
-  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} !torch.vtensor<[1,1,1,1],f32>
-  // Verify output is reshaped back
+  // CHECK: torch.aten.reshape %arg0, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.reshape %arg1, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.reshape %arg2, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.arange {{.*}} -> !torch.vtensor<[1],si64>
+  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,1],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,1],f32>
+  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,1,1],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,16],f32>
   %0 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<> : tensor<1x2x0x8xf32>} : () -> !torch.vtensor<[1,2,0,8],f32>
   %1 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<> : tensor<1x2x0x8xf32>} : () -> !torch.vtensor<[1,2,0,8],f32>
@@ -2562,20 +2561,19 @@ func.func @test_group_query_attention(%arg0: !torch.vtensor<[1,1,16],f32>, %arg1
 
 // -----
 
-// CHECK-LABEL:   func.func @test_group_query_attention_with_rotary_embedding(
+// CHECK-LABEL: func.func @test_group_query_attention_with_rotary_embedding
 func.func @test_group_query_attention_with_rotary_embedding(%query: !torch.vtensor<[1,1,16],f32>, %key: !torch.vtensor<[1,1,16],f32>, %value: !torch.vtensor<[1,1,16],f32>, %cos_cache: !torch.vtensor<[2,4],f32>, %sin_cache: !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
-  // Verify query, key, value are reshaped
-  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // Verify rotary embeddings are applied to query and key
-  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // Verify attention mask is generated
-  // CHECK: torch.aten.where.self
-  // Verify SDPA with mask
-  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} !torch.vtensor<[1,1,1,1],f32>
-  // Verify output reshape
+  // CHECK: torch.aten.reshape %arg0, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.reshape %arg1, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.reshape %arg2, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.onnx.rotary_embedding {{.*}} %arg3, %arg4, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.onnx.rotary_embedding {{.*}} %arg3, %arg4, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,1],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,1],f32>
+  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,1,1],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,16],f32>
   %0 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<> : tensor<1x2x0x8xf32>} : () -> !torch.vtensor<[1,2,0,8],f32>
   %1 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<> : tensor<1x2x0x8xf32>} : () -> !torch.vtensor<[1,2,0,8],f32>
@@ -2589,17 +2587,19 @@ func.func @test_group_query_attention_with_rotary_embedding(%query: !torch.vtens
 // -----
 
 // Test GroupQueryAttention with packed QKV input and rotary embedding
-// In packed QKV mode, the first operand contains Q, K, V concatenated along the hidden dimension
 // packed_qkv shape: [batch, seq, num_heads*head_size + 2*kv_num_heads*head_size]
-// With num_heads=2, kv_num_heads=2, head_size=8: packed_qkv_size = 16 + 16 + 16 = 48
-// CHECK-LABEL:   func.func @test_group_query_attention_packed_qkv_rotary(
+// CHECK-LABEL: func.func @test_group_query_attention_packed_qkv_rotary
 func.func @test_group_query_attention_packed_qkv_rotary(%packed_qkv: !torch.vtensor<[1,1,48],f32>, %past_key: !torch.vtensor<[1,2,0,8],f32>, %past_value: !torch.vtensor<[1,2,0,8],f32>, %cos_cache: !torch.vtensor<[2,4],f32>, %sin_cache: !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
-  // CHECK: torch.aten.slice.Tensor
-  // CHECK: torch.aten.slice.Tensor
-  // CHECK: torch.aten.slice.Tensor
-  // CHECK: torch.onnx.rotary_embedding
-  // CHECK: torch.onnx.rotary_embedding
-  // CHECK: torch.aten.scaled_dot_product_attention
+  // CHECK: %[[Q_SLICE:.*]] = torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[1,1,16],f32>
+  // CHECK: %[[K_SLICE:.*]] = torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[1,1,16],f32>
+  // CHECK: %[[V_SLICE:.*]] = torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[1,1,16],f32>
+  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.prim.ListConstruct %arg1, {{.*}} -> !torch.list<vtensor>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.prim.ListConstruct %arg2, {{.*}} -> !torch.list<vtensor>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   %0 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<1> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
   %1 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<1> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
   %2:3 = torch.operator "onnx.GroupQueryAttention"(%packed_qkv, %past_key, %past_value, %0, %1, %cos_cache, %sin_cache) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64, torch.onnx.do_rotary = 1 : si64} : (!torch.vtensor<[1,1,48],f32>, !torch.vtensor<[1,2,0,8],f32>, !torch.vtensor<[1,2,0,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>, !torch.vtensor<[2,4],f32>, !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>)
@@ -2608,33 +2608,36 @@ func.func @test_group_query_attention_packed_qkv_rotary(%packed_qkv: !torch.vten
 
 // -----
 
-// Test GroupQueryAttention with packed QKV input, rotary embedding, and dynamic batch/sequence dimensions
-// This matches real-world models like Phi-3 where batch and sequence are dynamic
-// packed_qkv: [?, ?, 6144] where 6144 = 32*128 + 2*8*128 (num_heads=32, kv_num_heads=8, head_size=128)
-// CHECK-LABEL:   func.func @test_group_query_attention_packed_qkv_dynamic(
+// Test GroupQueryAttention with packed QKV and dynamic dimensions
+// CHECK-LABEL: func.func @test_group_query_attention_packed_qkv_dynamic
 func.func @test_group_query_attention_packed_qkv_dynamic(%packed_qkv: !torch.vtensor<[?,?,6144],f32>, %past_key: !torch.vtensor<[?,8,?,128],f32>, %past_value: !torch.vtensor<[?,8,?,128],f32>, %seqlens_k: !torch.vtensor<[?],si32>, %total_seq_len: !torch.vtensor<[],si32>, %cos_cache: !torch.vtensor<[131072,64],f32>, %sin_cache: !torch.vtensor<[131072,64],f32>) -> (!torch.vtensor<[?,?,4096],f32>, !torch.vtensor<[?,8,?,128],f32>, !torch.vtensor<[?,8,?,128],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
-  // CHECK: torch.aten.slice.Tensor
-  // CHECK: torch.aten.slice.Tensor
-  // CHECK: torch.aten.slice.Tensor
-  // CHECK: torch.aten.size.int
-  // CHECK: torch.aten.size.int
-  // CHECK: torch.onnx.rotary_embedding
-  // CHECK: torch.onnx.rotary_embedding
-  // CHECK: torch.aten.scaled_dot_product_attention
+  // CHECK: torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[?,?,4096],f32>
+  // CHECK: torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[?,?,1024],f32>
+  // CHECK: torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[?,?,1024],f32>
+  // CHECK: torch.aten.size.int {{.*}} -> !torch.int
+  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[?,32,?,128],f32>
+  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[?,8,?,128],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[?,8,?,128],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[?,8,?,128],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[?,32,?,128],f32>
   %0:3 = torch.operator "onnx.GroupQueryAttention"(%packed_qkv, %past_key, %past_value, %seqlens_k, %total_seq_len, %cos_cache, %sin_cache) {torch.onnx.kv_num_heads = 8 : si64, torch.onnx.num_heads = 32 : si64, torch.onnx.do_rotary = 1 : si64, torch.onnx.smooth_softmax = -1 : si64, torch.onnx.scale = 8.838835e-02 : f32} : (!torch.vtensor<[?,?,6144],f32>, !torch.vtensor<[?,8,?,128],f32>, !torch.vtensor<[?,8,?,128],f32>, !torch.vtensor<[?],si32>, !torch.vtensor<[],si32>, !torch.vtensor<[131072,64],f32>, !torch.vtensor<[131072,64],f32>) -> (!torch.vtensor<[?,?,4096],f32>, !torch.vtensor<[?,8,?,128],f32>, !torch.vtensor<[?,8,?,128],f32>)
   return %0#0, %0#1, %0#2 : !torch.vtensor<[?,?,4096],f32>, !torch.vtensor<[?,8,?,128],f32>, !torch.vtensor<[?,8,?,128],f32>
 }
 
 // -----
 
-// Test GroupQueryAttention with packed QKV input but without rotary embedding (5 operands)
-// CHECK-LABEL:   func.func @test_group_query_attention_packed_qkv_no_rotary(
+// Test GroupQueryAttention with packed QKV but without rotary embedding
+// CHECK-LABEL: func.func @test_group_query_attention_packed_qkv_no_rotary
 func.func @test_group_query_attention_packed_qkv_no_rotary(%packed_qkv: !torch.vtensor<[1,1,48],f32>, %past_key: !torch.vtensor<[1,2,0,8],f32>, %past_value: !torch.vtensor<[1,2,0,8],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
-  // CHECK: torch.aten.slice.Tensor
-  // CHECK: torch.aten.slice.Tensor
-  // CHECK: torch.aten.slice.Tensor
+  // CHECK: torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[1,1,16],f32>
+  // CHECK: torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[1,1,16],f32>
+  // CHECK: torch.aten.slice.Tensor %arg0, {{.*}} -> !torch.vtensor<[1,1,16],f32>
   // CHECK-NOT: torch.onnx.rotary_embedding
-  // CHECK: torch.aten.scaled_dot_product_attention
+  // CHECK: torch.prim.ListConstruct %arg1, {{.*}} -> !torch.list<vtensor>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.prim.ListConstruct %arg2, {{.*}} -> !torch.list<vtensor>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   %0 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<1> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
   %1 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<1> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
   %2:3 = torch.operator "onnx.GroupQueryAttention"(%packed_qkv, %past_key, %past_value, %0, %1) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64} : (!torch.vtensor<[1,1,48],f32>, !torch.vtensor<[1,2,0,8],f32>, !torch.vtensor<[1,2,0,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>)
@@ -2643,19 +2646,18 @@ func.func @test_group_query_attention_packed_qkv_no_rotary(%packed_qkv: !torch.v
 
 // -----
 
-// Test GroupQueryAttention with num_heads != kv_num_heads and rotary embedding
-// This specifically tests that the key rotary embedding uses kInput.getType() not qInput.getType()
-// num_heads=4, kv_num_heads=2, head_size=8
-// q_hidden = 4*8 = 32, kv_hidden = 2*8 = 16
-// CHECK-LABEL:   func.func @test_group_query_attention_gqa_rotary(
+// Test GQA with num_heads != kv_num_heads and rotary embedding
+// num_heads=4, kv_num_heads=2 - key rotary must use kv_num_heads, not num_heads
+// CHECK-LABEL: func.func @test_group_query_attention_gqa_rotary
 func.func @test_group_query_attention_gqa_rotary(%query: !torch.vtensor<[1,1,32],f32>, %key: !torch.vtensor<[1,1,16],f32>, %value: !torch.vtensor<[1,1,16],f32>, %cos_cache: !torch.vtensor<[2,4],f32>, %sin_cache: !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,1,32],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
-  // CHECK: %[[QUERY_RESHAPE:.*]] = torch.aten.reshape %{{.*}} : !torch.vtensor<[1,1,32],f32>, !torch.list<int> -> !torch.vtensor<[1,4,1,8],f32>
-  // CHECK: %[[KEY_RESHAPE:.*]] = torch.aten.reshape %{{.*}} : !torch.vtensor<[1,1,16],f32>, !torch.list<int> -> !torch.vtensor<[1,2,1,8],f32>
-  // Verify rotary embedding for query produces [1,4,1,8] (num_heads=4)
-  // CHECK: %[[Q_ROTARY:.*]] = torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,4,1,8],f32>
-  // Verify rotary embedding for key produces [1,2,1,8] (kv_num_heads=2), NOT [1,4,1,8]
-  // CHECK: %[[K_ROTARY:.*]] = torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
-  // CHECK: torch.aten.scaled_dot_product_attention
+  // CHECK: torch.aten.reshape %arg0, {{.*}} -> !torch.vtensor<[1,4,1,8],f32>
+  // CHECK: torch.aten.reshape %arg1, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.reshape %arg2, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,4,1,8],f32>
+  // CHECK: torch.onnx.rotary_embedding {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} !torch.vtensor<[1,4,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>
   %0 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<> : tensor<1x2x0x8xf32>} : () -> !torch.vtensor<[1,2,0,8],f32>
   %1 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<> : tensor<1x2x0x8xf32>} : () -> !torch.vtensor<[1,2,0,8],f32>
   %2 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<1> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
@@ -2667,27 +2669,44 @@ func.func @test_group_query_attention_gqa_rotary(%query: !torch.vtensor<[1,1,32]
 // -----
 
 // Test GroupQueryAttention with KV cache (non-zero past sequence length)
-// This tests that:
-// 1. Attention uses the full KV cache (past + current), not just current
-// 2. An attention mask is generated from seqlens_k to mask invalid positions
-// past_key/past_value have shape [1, 2, 4, 8] (4 past tokens cached)
-// seqlens_k = 4 means 4 valid past tokens
-// CHECK-LABEL:   func.func @test_group_query_attention_kv_cache(
+// past_key/past_value [1,2,4,8] + current [1,2,1,8] -> present [1,2,5,8]
+// CHECK-LABEL: func.func @test_group_query_attention_kv_cache
 func.func @test_group_query_attention_kv_cache(%query: !torch.vtensor<[1,1,16],f32>, %key: !torch.vtensor<[1,1,16],f32>, %value: !torch.vtensor<[1,1,16],f32>, %past_key: !torch.vtensor<[1,2,4,8],f32>, %past_value: !torch.vtensor<[1,2,4,8],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
-  // Verify that past_key is concatenated with current key before attention
+  // CHECK: torch.aten.reshape %arg0, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.reshape %arg1, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.aten.reshape %arg2, {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
+  // CHECK: torch.prim.ListConstruct %arg3, {{.*}} -> !torch.list<vtensor>
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,5,8],f32>
-  // Verify that past_value is concatenated with current value before attention
+  // CHECK: torch.prim.ListConstruct %arg4, {{.*}} -> !torch.list<vtensor>
   // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,5,8],f32>
-  // Verify attention mask is generated (arange for positions)
-  // CHECK: torch.aten.arange
-  // Verify mask comparison with valid lengths
-  // CHECK: torch.aten.lt.Tensor
-  // Verify where operation to create float mask with -inf for invalid positions
-  // CHECK: torch.aten.where.self
-  // Verify SDPA uses the concatenated KV cache
-  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>
+  // CHECK: torch.aten.arange {{.*}} -> !torch.vtensor<[5],si64>
+  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,5],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,5],f32>
+  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,1,5],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,1,8],f32>
   %seqlens_k = torch.operator "onnx.Constant"() {torch.onnx.value = dense<4> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
   %total_seq_len = torch.operator "onnx.Constant"() {torch.onnx.value = dense<5> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
   %0:3 = torch.operator "onnx.GroupQueryAttention"(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64} : (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,4,8],f32>, !torch.vtensor<[1,2,4,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>)
   return %0#0, %0#1, %0#2 : !torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>
+}
+
+// -----
+
+// Test GQA with multi-token prefill (seqLen=2) to verify mask shape [1,1,2,5]
+// CHECK-LABEL: func.func @test_group_query_attention_prefill_mask_shape
+func.func @test_group_query_attention_prefill_mask_shape(%query: !torch.vtensor<[1,2,16],f32>, %key: !torch.vtensor<[1,2,16],f32>, %value: !torch.vtensor<[1,2,16],f32>, %past_key: !torch.vtensor<[1,2,3,8],f32>, %past_value: !torch.vtensor<[1,2,3,8],f32>) -> (!torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
+  // CHECK: torch.aten.reshape %arg0, {{.*}} -> !torch.vtensor<[1,2,2,8],f32>
+  // CHECK: torch.aten.reshape %arg1, {{.*}} -> !torch.vtensor<[1,2,2,8],f32>
+  // CHECK: torch.aten.reshape %arg2, {{.*}} -> !torch.vtensor<[1,2,2,8],f32>
+  // CHECK: torch.prim.ListConstruct %arg3, {{.*}} -> !torch.list<vtensor>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,5,8],f32>
+  // CHECK: torch.prim.ListConstruct %arg4, {{.*}} -> !torch.list<vtensor>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,5,8],f32>
+  // CHECK: torch.aten.expand {{.*}} -> !torch.vtensor<[1,2,5],f32>
+  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,2,5],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,2,8],f32>
+  %seqlens_k = torch.operator "onnx.Constant"() {torch.onnx.value = dense<3> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
+  %total_seq_len = torch.operator "onnx.Constant"() {torch.onnx.value = dense<5> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
+  %0:3 = torch.operator "onnx.GroupQueryAttention"(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64} : (!torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,3,8],f32>, !torch.vtensor<[1,2,3,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>) -> (!torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>)
+  return %0#0, %0#1, %0#2 : !torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>
 }
