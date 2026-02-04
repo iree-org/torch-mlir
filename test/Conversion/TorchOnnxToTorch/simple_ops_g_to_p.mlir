@@ -2656,3 +2656,23 @@ func.func @test_group_query_attention_with_rotary_embedding(%query: !torch.vtens
   %4:3 = torch.operator "onnx.GroupQueryAttention"(%query, %key, %value, %0, %1, %2, %3, %cos_cache, %sin_cache) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64, torch.onnx.do_rotary = 1 : si64} : (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,0,8],f32>, !torch.vtensor<[1,2,0,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>, !torch.vtensor<[2,4],f32>, !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>)
   return %4#0, %4#1, %4#2 : !torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>
 }
+
+// -----
+
+// Test GroupQueryAttention with packed QKV input and rotary embedding
+// In packed QKV mode, the first operand contains Q, K, V concatenated along the hidden dimension
+// packed_qkv shape: [batch, seq, num_heads*head_size + 2*kv_num_heads*head_size]
+// With num_heads=2, kv_num_heads=2, head_size=8: packed_qkv_size = 16 + 16 + 16 = 48
+// CHECK-LABEL:   func.func @test_group_query_attention_packed_qkv_rotary(
+func.func @test_group_query_attention_packed_qkv_rotary(%packed_qkv: !torch.vtensor<[1,1,48],f32>, %past_key: !torch.vtensor<[1,2,0,8],f32>, %past_value: !torch.vtensor<[1,2,0,8],f32>, %cos_cache: !torch.vtensor<[2,4],f32>, %sin_cache: !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
+  // CHECK: torch.aten.slice.Tensor
+  // CHECK: torch.aten.slice.Tensor
+  // CHECK: torch.aten.slice.Tensor
+  // CHECK: torch.onnx.rotary_embedding
+  // CHECK: torch.onnx.rotary_embedding
+  // CHECK: torch.aten.scaled_dot_product_attention
+  %0 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<1> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
+  %1 = torch.operator "onnx.Constant"() {torch.onnx.value = dense<1> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
+  %2:3 = torch.operator "onnx.GroupQueryAttention"(%packed_qkv, %past_key, %past_value, %0, %1, %cos_cache, %sin_cache) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64, torch.onnx.do_rotary = 1 : si64} : (!torch.vtensor<[1,1,48],f32>, !torch.vtensor<[1,2,0,8],f32>, !torch.vtensor<[1,2,0,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>, !torch.vtensor<[2,4],f32>, !torch.vtensor<[2,4],f32>) -> (!torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>)
+  return %2#0, %2#1, %2#2 : !torch.vtensor<[1,1,16],f32>, !torch.vtensor<[1,2,1,8],f32>, !torch.vtensor<[1,2,1,8],f32>
+}
