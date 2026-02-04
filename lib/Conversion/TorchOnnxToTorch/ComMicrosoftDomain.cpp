@@ -293,10 +293,15 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
               Torch::AtenReciprocalOp::create(rewriter, loc, meanType, rms);
         }
 
+        // Note: While the ONNX spec says output order is (output, mean,
+        // inv_std_var, input_skip_bias_sum), in practice ORT and real models
+        // expect the 2-output case to return (output, input_skip_bias_sum)
+        // since that's what's needed for transformer residual connections.
         if (resultTypes.size() == 1) {
           rewriter.replaceOp(binder.op, {output});
         } else if (resultTypes.size() == 2) {
-          rewriter.replaceOp(binder.op, {output, meanSquared}); // mean
+          // Return input_skip_bias_sum as 2nd output for backward compatibility
+          rewriter.replaceOp(binder.op, {output, s});
         } else if (resultTypes.size() == 3) {
           rewriter.replaceOp(binder.op, {output, meanSquared, invStdVar});
         } else if (resultTypes.size() == 4) {
