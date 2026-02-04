@@ -2692,6 +2692,29 @@ func.func @test_group_query_attention_kv_cache(%query: !torch.vtensor<[1,1,16],f
 
 // -----
 
+// Test GQA seqlens_k mask boundary: per ONNX spec, seqlens_k = total_sequence_lengths - 1,
+// so mask boundary should be seqlens_k + 1 (not seqlens_k + seq_q).
+// This test uses seq_q=4 to verify the mask uses +1, not +4.
+// past_key=3, current=4, total=7, seqlens_k=6 (=7-1), mask boundary=7
+// CHECK-LABEL: func.func @test_group_query_attention_seqlens_k_mask
+func.func @test_group_query_attention_seqlens_k_mask(%query: !torch.vtensor<[1,4,16],f32>, %key: !torch.vtensor<[1,4,16],f32>, %value: !torch.vtensor<[1,4,16],f32>, %past_key: !torch.vtensor<[1,2,3,8],f32>, %past_value: !torch.vtensor<[1,2,3,8],f32>) -> (!torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,7,8],f32>, !torch.vtensor<[1,2,7,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {
+  // Verify mask boundary uses seqlens_k + 1, generating mask with KV seq length 7
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,7,8],f32>
+  // CHECK: torch.aten.cat {{.*}} -> !torch.vtensor<[1,2,7,8],f32>
+  // CHECK: torch.aten.arange {{.*}} -> !torch.vtensor<[7],si64>
+  // CHECK: torch.aten.lt.Tensor {{.*}} -> !torch.vtensor<[1,7],i1>
+  // CHECK: torch.aten.where.self {{.*}} -> !torch.vtensor<[1,7],f32>
+  // CHECK: torch.aten.expand {{.*}} -> !torch.vtensor<[1,4,7],f32>
+  // CHECK: torch.aten.reshape {{.*}} -> !torch.vtensor<[1,1,4,7],f32>
+  // CHECK: torch.aten.scaled_dot_product_attention {{.*}} -> !torch.vtensor<[1,2,4,8],f32>
+  %seqlens_k = torch.operator "onnx.Constant"() {torch.onnx.value = dense<6> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
+  %total_seq_len = torch.operator "onnx.Constant"() {torch.onnx.value = dense<7> : tensor<1xsi32>} : () -> !torch.vtensor<[1],si32>
+  %0:3 = torch.operator "onnx.GroupQueryAttention"(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len) {torch.onnx.kv_num_heads = 2 : si64, torch.onnx.num_heads = 2 : si64} : (!torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,3,8],f32>, !torch.vtensor<[1,2,3,8],f32>, !torch.vtensor<[1],si32>, !torch.vtensor<[1],si32>) -> (!torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,7,8],f32>, !torch.vtensor<[1,2,7,8],f32>)
+  return %0#0, %0#1, %0#2 : !torch.vtensor<[1,4,16],f32>, !torch.vtensor<[1,2,7,8],f32>, !torch.vtensor<[1,2,7,8],f32>
+}
+
+// -----
+
 // Test GQA with multi-token prefill (seqLen=2) to verify mask shape [1,1,2,5]
 // CHECK-LABEL: func.func @test_group_query_attention_prefill_mask_shape
 func.func @test_group_query_attention_prefill_mask_shape(%query: !torch.vtensor<[1,2,16],f32>, %key: !torch.vtensor<[1,2,16],f32>, %value: !torch.vtensor<[1,2,16],f32>, %past_key: !torch.vtensor<[1,2,3,8],f32>, %past_value: !torch.vtensor<[1,2,3,8],f32>) -> (!torch.vtensor<[1,2,16],f32>, !torch.vtensor<[1,2,5,8],f32>, !torch.vtensor<[1,2,5,8],f32>) attributes {torch.onnx_meta.ir_version = 10 : si64, torch.onnx_meta.opset_version = 22 : si64, torch.onnx_meta.producer_name = "", torch.onnx_meta.producer_version = ""} {

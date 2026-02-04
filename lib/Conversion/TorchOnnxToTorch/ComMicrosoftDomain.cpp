@@ -840,12 +840,15 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
                   /*copy=*/cstFalse, /*memory_format=*/cstNone);
             }
 
-            // total_valid_len = seqlens_k + seq_q (per batch element)
+            // total_valid_len = seqlens_k + 1 (per batch element)
+            // Per ONNX spec, seqlens_k is "Equivalent to
+            // (total_sequence_lengths - 1)" so seqlens_k + 1 gives the total
+            // valid KV sequence length.
             Value cstIntOne = Torch::ConstantIntOp::create(
                 rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
             Value totalValidLen = Torch::AtenAddScalarOp::create(
                 rewriter, loc, seqlensKInt64.getType(), seqlensKInt64,
-                cstSequenceLength, cstIntOne);
+                cstIntOne, cstIntOne);
 
             // Get KV sequence dimension size
             Value cstDim2 = Torch::ConstantIntOp::create(
