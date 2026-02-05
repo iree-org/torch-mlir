@@ -577,44 +577,87 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         // Value: (batch_size, kv_sequence_length, kv_hidden_size)
         //     -> (batch_size, kv_num_heads, sequence_length, head_size)
 
-        // Reshaping query.
-        SmallVector<int64_t> queryReshapeSizesInt{batchSize, numHeads,
-                                                  sequenceLength, headSize};
-        Value queryReshapeSizesList = Torch::PrimListConstructOp::create(
-            rewriter, binder.getLoc(),
-            Torch::ListType::get(Torch::IntType::get(query.getContext())),
-            llvm::SmallVector<Value>{cstBatchSize, cstNumHeads,
-                                     cstSequenceLength, cstHeadSize});
-        Value qInput = Torch::AtenReshapeOp::create(
-            rewriter, loc,
-            queryType.getWithSizesAndDtype(queryReshapeSizesInt,
-                                           queryType.getOptionalDtype()),
-            query, queryReshapeSizesList);
+        // Reshaping Q/K/V from [batch, seq, hidden] to [batch, heads, seq,
+        // head_size] This requires:
+        // 1. Reshape to [batch, seq, heads, head_size]
+        // 2. Transpose dims 1 and 2 to get [batch, heads, seq, head_size]
+        // A direct reshape would incorrectly interleave heads and sequence
+        // positions.
 
-        // Reshaping key.
-        SmallVector<int64_t> kvReshapeSizesInt{batchSize, kvNumHeads,
-                                               sequenceLength, headSize};
-        Value kvReshapeSizesList = Torch::PrimListConstructOp::create(
+        Value cstDim1 = Torch::ConstantIntOp::create(
+            rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
+        Value cstDim2 = Torch::ConstantIntOp::create(
+            rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(2));
+
+        // Reshaping query: [batch, seq, hidden] -> [batch, seq, num_heads,
+        // head_size]
+        SmallVector<int64_t> queryIntermediateSizesInt{
+            batchSize, sequenceLength, numHeads, headSize};
+        Value queryIntermediateSizesList = Torch::PrimListConstructOp::create(
             rewriter, binder.getLoc(),
             Torch::ListType::get(Torch::IntType::get(query.getContext())),
-            llvm::SmallVector<Value>{cstBatchSize, cstKVNumHeads,
-                                     cstSequenceLength, cstHeadSize});
+            llvm::SmallVector<Value>{cstBatchSize, cstSequenceLength,
+                                     cstNumHeads, cstHeadSize});
+        Value qIntermediate = Torch::AtenReshapeOp::create(
+            rewriter, loc,
+            queryType.getWithSizesAndDtype(queryIntermediateSizesInt,
+                                           queryType.getOptionalDtype()),
+            query, queryIntermediateSizesList);
+
+        // Transpose query: [batch, seq, num_heads, head_size] -> [batch,
+        // num_heads, seq, head_size]
+        SmallVector<int64_t> queryFinalSizesInt{batchSize, numHeads,
+                                                sequenceLength, headSize};
+        Value qInput = Torch::AtenTransposeIntOp::create(
+            rewriter, loc,
+            queryType.getWithSizesAndDtype(queryFinalSizesInt,
+                                           queryType.getOptionalDtype()),
+            qIntermediate, cstDim1, cstDim2);
+
+        // Reshaping key: [batch, seq, kv_hidden] -> [batch, seq, kv_num_heads,
+        // head_size]
+        SmallVector<int64_t> kvIntermediateSizesInt{batchSize, sequenceLength,
+                                                    kvNumHeads, headSize};
+        Value kvIntermediateSizesList = Torch::PrimListConstructOp::create(
+            rewriter, binder.getLoc(),
+            Torch::ListType::get(Torch::IntType::get(query.getContext())),
+            llvm::SmallVector<Value>{cstBatchSize, cstSequenceLength,
+                                     cstKVNumHeads, cstHeadSize});
         Torch::ValueTensorType keyType =
             cast<Torch::ValueTensorType>(key.getType());
-        Value kInput = Torch::AtenReshapeOp::create(
+        Value kIntermediate = Torch::AtenReshapeOp::create(
             rewriter, loc,
-            keyType.getWithSizesAndDtype(kvReshapeSizesInt,
+            keyType.getWithSizesAndDtype(kvIntermediateSizesInt,
                                          keyType.getOptionalDtype()),
-            key, kvReshapeSizesList);
+            key, kvIntermediateSizesList);
 
-        // Reshaping value.
+        // Transpose key: [batch, seq, kv_num_heads, head_size] -> [batch,
+        // kv_num_heads, seq, head_size]
+        SmallVector<int64_t> kvFinalSizesInt{batchSize, kvNumHeads,
+                                             sequenceLength, headSize};
+        Value kInput = Torch::AtenTransposeIntOp::create(
+            rewriter, loc,
+            keyType.getWithSizesAndDtype(kvFinalSizesInt,
+                                         keyType.getOptionalDtype()),
+            kIntermediate, cstDim1, cstDim2);
+
+        // Reshaping value: [batch, seq, kv_hidden] -> [batch, seq,
+        // kv_num_heads, head_size]
         Torch::ValueTensorType valueType =
             cast<Torch::ValueTensorType>(value.getType());
-        Value vInput = Torch::AtenReshapeOp::create(
+        Value vIntermediate = Torch::AtenReshapeOp::create(
             rewriter, loc,
-            valueType.getWithSizesAndDtype(kvReshapeSizesInt,
+            valueType.getWithSizesAndDtype(kvIntermediateSizesInt,
                                            valueType.getOptionalDtype()),
-            value, kvReshapeSizesList);
+            value, kvIntermediateSizesList);
+
+        // Transpose value: [batch, seq, kv_num_heads, head_size] -> [batch,
+        // kv_num_heads, seq, head_size]
+        Value vInput = Torch::AtenTransposeIntOp::create(
+            rewriter, loc,
+            valueType.getWithSizesAndDtype(kvFinalSizesInt,
+                                           valueType.getOptionalDtype()),
+            vIntermediate, cstDim1, cstDim2);
 
         Value cstNone = Torch::ConstantNoneOp::create(rewriter, loc);
         Value cstFalse = Torch::ConstantBoolOp::create(rewriter, loc, false);
@@ -988,13 +1031,37 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
         // Reshaping the attention result from:
         //    (batch_size, num_heads, sequence_length, head_size)
         // -> (batch_size, sequence_length, hidden_size)
+        // This requires:
+        // 1. Transpose dims 1 and 2: [batch, num_heads, seq, head_size]
+        //                         -> [batch, seq, num_heads, head_size]
+        // 2. Reshape: [batch, seq, num_heads, head_size] -> [batch, seq,
+        // hidden]
+        Value cstTransposeDim1 = Torch::ConstantIntOp::create(
+            rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(1));
+        Value cstTransposeDim2 = Torch::ConstantIntOp::create(
+            rewriter, binder.getLoc(), rewriter.getI64IntegerAttr(2));
+
+        // Transpose: [batch, num_heads, seq, head_size] -> [batch, seq,
+        // num_heads, head_size]
+        SmallVector<int64_t> attnTransposedSizes{batchSize, sequenceLength,
+                                                 numHeads, headSize};
+        Torch::ValueTensorType attnType =
+            cast<Torch::ValueTensorType>(attention.getType());
+        Value attnTransposed = Torch::AtenTransposeIntOp::create(
+            rewriter, loc,
+            attnType.getWithSizesAndDtype(attnTransposedSizes,
+                                          attnType.getOptionalDtype()),
+            attention, cstTransposeDim1, cstTransposeDim2);
+
+        // Reshape: [batch, seq, num_heads, head_size] -> [batch, seq, hidden]
         Value attentionResultSizesList = Torch::PrimListConstructOp::create(
             rewriter, binder.getLoc(),
             Torch::ListType::get(Torch::IntType::get(attention.getContext())),
             llvm::SmallVector<Value>{cstBatchSize, cstSequenceLength,
                                      cstHiddenSize});
-        attention = Torch::AtenReshapeOp::create(
-            rewriter, loc, resultTypes[0], attention, attentionResultSizesList);
+        attention = Torch::AtenReshapeOp::create(rewriter, loc, resultTypes[0],
+                                                 attnTransposed,
+                                                 attentionResultSizesList);
 
         rewriter.replaceOp(binder.op, {attention, presentKey, presentValue});
         return success();
@@ -1110,38 +1177,62 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
             rewriter, loc, rewriter.getType<Torch::IntType>(), query, cstOne);
 
         // Reshape Q, K, V from (batch, seq, hidden) to (batch, num_heads, seq,
-        // head_size)
-        SmallVector<int64_t> reshapeSizesInt{batchSize, numHeads,
-                                             sequenceLength, headSize};
-        Value reshapeSizesList = Torch::PrimListConstructOp::create(
+        // head_size) using reshape + transpose to correctly separate heads.
+        // 1. Reshape: [batch, seq, hidden] -> [batch, seq, num_heads,
+        // head_size]
+        // 2. Transpose: [batch, seq, num_heads, head_size] -> [batch,
+        // num_heads, seq, head_size]
+        SmallVector<int64_t> intermediateSizesInt{batchSize, sequenceLength,
+                                                  numHeads, headSize};
+        Value intermediateSizesList = Torch::PrimListConstructOp::create(
             rewriter, loc, Torch::ListType::get(Torch::IntType::get(context)),
-            SmallVector<Value>{batchSizeVal, cstNumHeads, seqLenVal,
+            SmallVector<Value>{batchSizeVal, seqLenVal, cstNumHeads,
                                cstHeadSize});
+        SmallVector<int64_t> finalSizesInt{batchSize, numHeads, sequenceLength,
+                                           headSize};
+        Value cstDim1 = cstOne;
+        Value cstDim2 = Torch::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64IntegerAttr(2));
 
-        // Reshape query
-        Value qInput = Torch::AtenReshapeOp::create(
+        // Reshape and transpose query
+        Value qIntermediate = Torch::AtenReshapeOp::create(
             rewriter, loc,
-            queryType.getWithSizesAndDtype(reshapeSizesInt,
+            queryType.getWithSizesAndDtype(intermediateSizesInt,
                                            queryType.getOptionalDtype()),
-            query, reshapeSizesList);
+            query, intermediateSizesList);
+        Value qInput = Torch::AtenTransposeIntOp::create(
+            rewriter, loc,
+            queryType.getWithSizesAndDtype(finalSizesInt,
+                                           queryType.getOptionalDtype()),
+            qIntermediate, cstDim1, cstDim2);
 
-        // Reshape key
+        // Reshape and transpose key
         Torch::ValueTensorType keyType =
             cast<Torch::ValueTensorType>(key.getType());
-        Value kInput = Torch::AtenReshapeOp::create(
+        Value kIntermediate = Torch::AtenReshapeOp::create(
             rewriter, loc,
-            keyType.getWithSizesAndDtype(reshapeSizesInt,
+            keyType.getWithSizesAndDtype(intermediateSizesInt,
                                          keyType.getOptionalDtype()),
-            key, reshapeSizesList);
+            key, intermediateSizesList);
+        Value kInput = Torch::AtenTransposeIntOp::create(
+            rewriter, loc,
+            keyType.getWithSizesAndDtype(finalSizesInt,
+                                         keyType.getOptionalDtype()),
+            kIntermediate, cstDim1, cstDim2);
 
-        // Reshape value
+        // Reshape and transpose value
         Torch::ValueTensorType valueType =
             cast<Torch::ValueTensorType>(value.getType());
-        Value vInput = Torch::AtenReshapeOp::create(
+        Value vIntermediate = Torch::AtenReshapeOp::create(
             rewriter, loc,
-            valueType.getWithSizesAndDtype(reshapeSizesInt,
+            valueType.getWithSizesAndDtype(intermediateSizesInt,
                                            valueType.getOptionalDtype()),
-            value, reshapeSizesList);
+            value, intermediateSizesList);
+        Value vInput = Torch::AtenTransposeIntOp::create(
+            rewriter, loc,
+            valueType.getWithSizesAndDtype(finalSizesInt,
+                                           valueType.getOptionalDtype()),
+            vIntermediate, cstDim1, cstDim2);
 
         // Create scale value - if scale is 0, use None for default behavior
         Value cstScale = cstNone;
@@ -1179,12 +1270,25 @@ void mlir::torch::onnx_c::populateComMicrosoftDomain(
             cstEnableGQA);
 
         // Reshape output back from (batch, num_heads, seq, head_size)
-        // to (batch, seq, hidden)
+        // to (batch, seq, hidden) using transpose + reshape.
+        // 1. Transpose: [batch, num_heads, seq, head_size] -> [batch, seq,
+        // num_heads, head_size]
+        // 2. Reshape: [batch, seq, num_heads, head_size] -> [batch, seq,
+        // hidden]
+        Torch::ValueTensorType attnType =
+            cast<Torch::ValueTensorType>(attention.getType());
+        Value attnTransposed = Torch::AtenTransposeIntOp::create(
+            rewriter, loc,
+            attnType.getWithSizesAndDtype(intermediateSizesInt,
+                                          attnType.getOptionalDtype()),
+            attention, cstDim1, cstDim2);
+
         Value attentionResultSizesList = Torch::PrimListConstructOp::create(
             rewriter, loc, Torch::ListType::get(Torch::IntType::get(context)),
             SmallVector<Value>{batchSizeVal, seqLenVal, cstHiddenSize});
-        Value output = Torch::AtenReshapeOp::create(
-            rewriter, loc, resultType, attention, attentionResultSizesList);
+        Value output = Torch::AtenReshapeOp::create(rewriter, loc, resultType,
+                                                    attnTransposed,
+                                                    attentionResultSizesList);
 
         rewriter.replaceOp(binder.op, {output});
         return success();
