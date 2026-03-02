@@ -1013,3 +1013,15 @@ func.func @channel_shuffle(%arg0: !torch.vtensor<[1,8,4,4],f32>) -> !torch.vtens
   %0 = torch.aten.channel_shuffle %arg0, %int4 : !torch.vtensor<[1,8,4,4],f32>, !torch.int -> !torch.vtensor<[1,8,4,4],f32>
   return %0 : !torch.vtensor<[1,8,4,4],f32>
 }
+
+// -----
+
+// CHECK-LABEL: func.func @miopen_batch_norm(
+// CHECK-NOT: torch.aten.miopen_batch_norm
+func.func @miopen_batch_norm(%input: !torch.vtensor<[1,3,4,4],f32>, %weight: !torch.vtensor<[3],f32>, %bias: !torch.vtensor<[3],f32>, %mean: !torch.vtensor<[3],f32>, %var: !torch.vtensor<[3],f32>) -> (!torch.vtensor<[1,3,4,4],f32>, !torch.vtensor<[3],f32>, !torch.vtensor<[3],f32>) {
+  %false = torch.constant.bool false
+  %momentum = torch.constant.float 1.000000e-01
+  %eps = torch.constant.float 1.000000e-05
+  %0:3 = torch.aten.miopen_batch_norm %input, %weight, %bias, %mean, %var, %false, %momentum, %eps : !torch.vtensor<[1,3,4,4],f32>, !torch.vtensor<[3],f32>, !torch.vtensor<[3],f32>, !torch.vtensor<[3],f32>, !torch.vtensor<[3],f32>, !torch.bool, !torch.float, !torch.float -> !torch.vtensor<[1,3,4,4],f32>, !torch.vtensor<[3],f32>, !torch.vtensor<[3],f32>
+  return %0#0, %0#1, %0#2 : !torch.vtensor<[1,3,4,4],f32>, !torch.vtensor<[3],f32>, !torch.vtensor<[3],f32>
+}
