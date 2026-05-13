@@ -1468,6 +1468,11 @@ def Torch_HigherOrderFlexAttentionOp : Torch_Op<"hop_flex_attention", [
       scale: Optional float for scaling attention scores (None means 1/sqrt(head_dim))
       return_lse: Bool to return log-sum-exp values
 
+    Variadic Args:
+      mask_mod_arguments: Additional values passed to mask_mod_fn after
+        (batch, head, token_q, token_kv). These make PyTorch mask_mod closure
+        captures explicit in MLIR.
+
     Attributes:
       enable_gqa: Optional bool metadata indicating lowerings should expand
         key/value heads to query heads for grouped-query attention. When
@@ -1492,6 +1497,7 @@ def Torch_HigherOrderFlexAttentionOp : Torch_Op<"hop_flex_attention", [
     AnyTorchOptionalFloatType:$scale,
     Torch_BoolType:$return_lse,
     Torch_BoolType:$return_max_scores,
+    Variadic<AnyTorchType>:$mask_mod_arguments,
     OptionalAttr<BoolAttr>:$enable_gqa,
     OptionalAttr<FlatSymbolRefAttr>:$score_mod_fn,
     OptionalAttr<FlatSymbolRefAttr>:$mask_mod_fn
@@ -1506,10 +1512,40 @@ def Torch_HigherOrderFlexAttentionOp : Torch_Op<"hop_flex_attention", [
   let hasCustomAssemblyFormat = 1;
   let extraClassDefinition = [{
     ParseResult HigherOrderFlexAttentionOp::parse(OpAsmParser &parser, OperationState &result) {
-      return parseDefaultTorchOp(parser, result, 6, 3);
+      constexpr int64_t kMinNumOperands = 6;
+      constexpr int64_t kNumResults = 3;
+      llvm::SMLoc loc = parser.getCurrentLocation();
+      SmallVector<OpAsmParser::UnresolvedOperand> operands;
+      if (parser.parseOperandList(operands))
+        return failure();
+      if (operands.size() < kMinNumOperands)
+        return parser.emitError(loc) << "expected at least " << kMinNumOperands
+                                     << " operands";
+      if (parser.parseOptionalAttrDict(result.attributes))
+        return failure();
+      if (parser.parseColon())
+        return failure();
+      SmallVector<Type> operandTypes;
+      if (parser.parseTypeList(operandTypes))
+        return failure();
+      if (operandTypes.size() != operands.size())
+        return parser.emitError(loc) << "expected " << operands.size()
+                                     << " operand types, but got "
+                                     << operandTypes.size();
+      if (parser.resolveOperands(operands, operandTypes, loc, result.operands))
+        return failure();
+      if (parser.parseArrow())
+        return failure();
+      if (parser.parseTypeList(result.types))
+        return failure();
+      if (result.types.size() != kNumResults)
+        return parser.emitError(loc) << "expected " << kNumResults
+                                     << " result types, but got "
+                                     << result.types.size();
+      return success();
     }
     void HigherOrderFlexAttentionOp::print(OpAsmPrinter &printer) {
-      printDefaultTorchOp(printer, *this, 6, 3);
+      printDefaultTorchOp(printer, *this, getNumOperands(), 3);
     }
   }];
   let hasVerifier = 1;

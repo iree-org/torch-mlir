@@ -1925,19 +1925,24 @@ class GraphNodeImporter:
     ):
         """Imports the torch._higher_order_ops.flex_attention HOP.
 
-        Args format: (query, key, value, score_mod, block_mask, scale, kernel_options, ...)
+        Args format:
+        (query, key, value, score_mod, block_mask, scale, kernel_options,
+         score_mod_other_buffers, mask_mod_other_buffers, ...)
         - query, key, value: Attention input tensors
         - score_mod: Optional submodule/callable for score modification (imported as function)
         - block_mask: Optional BlockMask tuple containing mask_mod function and runtime tensors
         - scale: Optional float for attention score scaling
         - kernel_options: Optional Dict of performance tuning options:
             - return_lse: Boolean for whether to return the log-sum-exp tensor
+        - mask_mod_other_buffers: Optional values captured by the mask_mod
+            function and made explicit as op operands
 
         This creates a call to hop_flex_attention with function symbol references for
         score_mod and mask_mod.
         """
         # flex_attention HOP args from PyTorch:
-        # (query, key, value, score_mod, block_mask, scale, kernel_options, ...)
+        # (query, key, value, score_mod, block_mask, scale, kernel_options,
+        #  score_mod_other_buffers, mask_mod_other_buffers, ...)
         (
             query_arg,
             key_arg,
@@ -1947,6 +1952,7 @@ class GraphNodeImporter:
             scale_arg,
             kernel_options,
         ) = node.args[:7]
+        mask_mod_other_buffers_arg = node.args[8] if len(node.args) > 8 else ()
 
         # Import Q, K, V tensors
         query = self._import_argument(loc, query_arg, None)
@@ -2027,10 +2033,23 @@ class GraphNodeImporter:
                 self._cc.torch_bool_type,
             ).result
 
+        if isinstance(
+            mask_mod_other_buffers_arg,
+            (list, tuple, torch_fx.immutable_collections.immutable_list),
+        ):
+            mask_mod_buffer_args = list(mask_mod_other_buffers_arg)
+        elif mask_mod_other_buffers_arg is None:
+            mask_mod_buffer_args = []
+        else:
+            mask_mod_buffer_args = [mask_mod_other_buffers_arg]
+        mask_mod_arguments = [
+            self._import_argument(loc, arg, None) for arg in mask_mod_buffer_args
+        ]
+
         # Build operands for aten.flex_attention.
-        # Op expects exactly 6 operands: query, key, value, scale, return_lse, return_max_scores.
+        # Op expects 6 fixed operands followed by mask_mod_arguments:
+        # query, key, value, scale, return_lse, return_max_scores, *mask_mod_arguments.
         # Note: score_mod_fn and mask_mod_fn go as ATTRIBUTES, not operands.
-        # Note: block_mask tensors are handled by mask_mod_fn, not passed as operands.
 
         flat_operands = [
             query,
@@ -2039,7 +2058,7 @@ class GraphNodeImporter:
             scale,
             return_lse,
             return_max_scores,
-        ]
+        ] + mask_mod_arguments
 
         # Build attributes with function references
         # Only include attributes if they're not None (OptionalAttr in TableGen)
