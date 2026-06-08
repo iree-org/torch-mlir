@@ -376,14 +376,6 @@ inline int64_t getIntAttrAsSigned(IntegerAttr intAttr) {
 
 template <> struct llvm::DenseMapInfo<::mlir::torch::Torch::SlotOp> {
   using SlotOp = ::mlir::torch::Torch::SlotOp;
-  static SlotOp getEmptyKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getEmptyKey();
-    return SlotOp::getFromOpaquePointer(pointer);
-  }
-  static SlotOp getTombstoneKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getTombstoneKey();
-    return SlotOp::getFromOpaquePointer(pointer);
-  }
   static unsigned getHashValue(SlotOp val) {
     return hash_value(val.getAsOpaquePointer());
   }
@@ -392,14 +384,6 @@ template <> struct llvm::DenseMapInfo<::mlir::torch::Torch::SlotOp> {
 
 template <> struct llvm::DenseMapInfo<::mlir::torch::Torch::NnModuleOp> {
   using NnModuleOp = ::mlir::torch::Torch::NnModuleOp;
-  static NnModuleOp getEmptyKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getEmptyKey();
-    return NnModuleOp::getFromOpaquePointer(pointer);
-  }
-  static NnModuleOp getTombstoneKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getTombstoneKey();
-    return NnModuleOp::getFromOpaquePointer(pointer);
-  }
   static unsigned getHashValue(NnModuleOp val) {
     return hash_value(val.getAsOpaquePointer());
   }
@@ -408,14 +392,6 @@ template <> struct llvm::DenseMapInfo<::mlir::torch::Torch::NnModuleOp> {
 
 template <> struct llvm::DenseMapInfo<::mlir::torch::Torch::ClassTypeOp> {
   using ClassTypeOp = ::mlir::torch::Torch::ClassTypeOp;
-  static ClassTypeOp getEmptyKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getEmptyKey();
-    return ClassTypeOp::getFromOpaquePointer(pointer);
-  }
-  static ClassTypeOp getTombstoneKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getTombstoneKey();
-    return ClassTypeOp::getFromOpaquePointer(pointer);
-  }
   static unsigned getHashValue(ClassTypeOp val) {
     return hash_value(val.getAsOpaquePointer());
   }
@@ -424,14 +400,6 @@ template <> struct llvm::DenseMapInfo<::mlir::torch::Torch::ClassTypeOp> {
 
 template <> struct llvm::DenseMapInfo<::mlir::torch::Torch::GlobalSlotOp> {
   using OpTy = ::mlir::torch::Torch::GlobalSlotOp;
-  static OpTy getEmptyKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getEmptyKey();
-    return OpTy::getFromOpaquePointer(pointer);
-  }
-  static OpTy getTombstoneKey() {
-    auto *pointer = llvm::DenseMapInfo<void *>::getTombstoneKey();
-    return OpTy::getFromOpaquePointer(pointer);
-  }
   static unsigned getHashValue(OpTy val) {
     return hash_value(val.getAsOpaquePointer());
   }
