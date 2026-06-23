@@ -29,6 +29,27 @@ using namespace mlir::torch::Torch;
 
 namespace {
 
+// Returns true only if `v` is a constant int tensor that provably contains a
+// non-zero element. Used to reject asymmetric per-channel weights (which would
+// be mis-scaled by the scalar-zero fast path); a non-literal or all-zero
+// constant returns false.
+static bool isProvablyNonZeroIntTensor(Value v) {
+  auto lit = v.getDefiningOp<ValueTensorLiteralOp>();
+  if (!lit)
+    return false;
+  if (auto splat = dyn_cast_or_null<SplatElementsAttr>(lit.getValue())) {
+    if (isa<IntegerType>(splat.getElementType()))
+      return !splat.getSplatValue<llvm::APInt>().isZero();
+    return false;
+  }
+  if (auto dense = dyn_cast_or_null<DenseIntElementsAttr>(lit.getValue())) {
+    for (const llvm::APInt &x : dense.getValues<llvm::APInt>())
+      if (!x.isZero())
+        return true;
+  }
+  return false;
+}
+
 // for uint8 types, we shift down by 128 so that we can faithfully
 // represent the quantization with signed i8 types.
 static void signShift(PatternRewriter &rewriter, Location loc, Value &arg,
@@ -111,6 +132,18 @@ public:
     getZeroPoint(op.getSelf(), lhsZeroPoint);
     getZeroPoint(op.getMat2(), rhsZeroPoint);
 
+    // Per-channel quantized weight: scalar-zero zero-point fast path (symmetric
+    // per-channel weight has zp==0; per-channel scale is applied in the dequant
+    // epilogue from FuseQuantizedOps). Reject provably-nonzero (asymmetric) zp.
+    bool rhsPerChannel =
+        op.getMat2().getDefiningOp<Aten_MakePerChannelQuantizedTensorOp>() !=
+        nullptr;
+    if (rhsPerChannel && rhsZeroPoint &&
+        isProvablyNonZeroIntTensor(rhsZeroPoint)) {
+      return rewriter.notifyMatchFailure(
+          op, "unsupported: per-channel weight with non-zero zero-point");
+    }
+
     if (static_cast<bool>(lhsZeroPoint) != static_cast<bool>(rhsZeroPoint)) {
       return rewriter.notifyMatchFailure(
           op, "unsupported: aten.mm with mixed quantization");
@@ -165,8 +198,14 @@ public:
           rhsZeroPoint);
       lhsZeroPoint = arith::TruncIOp::create(
           rewriter, loc, rewriter.getI32Type(), lhsZeroPoint);
-      rhsZeroPoint = arith::TruncIOp::create(
-          rewriter, loc, rewriter.getI32Type(), rhsZeroPoint);
+      if (rhsPerChannel) {
+        // Symmetric per-channel weight: scalar-zero zero-point (see above).
+        rhsZeroPoint = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI32IntegerAttr(0));
+      } else {
+        rhsZeroPoint = arith::TruncIOp::create(
+            rewriter, loc, rewriter.getI32Type(), rhsZeroPoint);
+      }
 
       // change uint8 quantization -> int8 quantization
       int64_t numBits =
@@ -265,6 +304,22 @@ public:
     getZeroPoint(op.getSelf(), lhsZeroPoint);
     getZeroPoint(op.getOther(), rhsZeroPoint);
 
+    // Per-channel quantized weight (per-output-channel scale): the
+    // quantized_matmul path below requires SCALAR zero-points, but a
+    // per-channel zero-point is a rank-1 [N] tensor. Per-channel symmetric
+    // weights (what FuseQuantizedOps folds) have zp==0, so we scalarize it to
+    // a scalar 0; the per-output-channel SCALE is applied in the dequant
+    // epilogue produced upstream (FuseQuantizedOps), not here. Reject a
+    // provably non-zero (asymmetric) per-channel zp rather than mis-scale.
+    bool rhsPerChannel =
+        op.getOther().getDefiningOp<Aten_MakePerChannelQuantizedTensorOp>() !=
+        nullptr;
+    if (rhsPerChannel && rhsZeroPoint &&
+        isProvablyNonZeroIntTensor(rhsZeroPoint)) {
+      return rewriter.notifyMatchFailure(
+          op, "unsupported: per-channel weight with non-zero zero-point");
+    }
+
     if (static_cast<bool>(lhsZeroPoint) != static_cast<bool>(rhsZeroPoint)) {
       return rewriter.notifyMatchFailure(
           op, "unsupported: aten.matmul with mixed quantization");
@@ -298,8 +353,14 @@ public:
           rhsZeroPoint);
       lhsZeroPoint = arith::TruncIOp::create(
           rewriter, loc, rewriter.getI32Type(), lhsZeroPoint);
-      rhsZeroPoint = arith::TruncIOp::create(
-          rewriter, loc, rewriter.getI32Type(), rhsZeroPoint);
+      if (rhsPerChannel) {
+        // Symmetric per-channel weight: scalar-zero zero-point (see above).
+        rhsZeroPoint = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getI32IntegerAttr(0));
+      } else {
+        rhsZeroPoint = arith::TruncIOp::create(
+            rewriter, loc, rewriter.getI32Type(), rhsZeroPoint);
+      }
 
       // change uint8 quantization -> int8 quantization
       int64_t numBits =
