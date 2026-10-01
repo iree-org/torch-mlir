@@ -17,6 +17,7 @@ include "mlir/IR/OpBase.td"
 //===----------------------------------------------------------------------===//
 
 def TMTensor_Dialect : Dialect {
+  let useStrictPropertiesInAssemblyFormat = 0;
   let name = "tm_tensor";
   let cppNamespace = "::mlir::torch::TMTensor";
   let description = [{
